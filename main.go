@@ -177,6 +177,77 @@ type Service struct {
 	activeCount   int
 }
 
+// Initialize Claude settings.json with custom env vars
+func initClaudeSettings() {
+	homeDir := os.Getenv("HOME")
+	if homeDir == "" {
+		homeDir = "/home/appuser"
+	}
+
+	settingsDir := filepath.Join(homeDir, ".claude")
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+
+	// Create directory if not exists
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		log.Printf("[WARN] Failed to create settings directory: %v", err)
+		return
+	}
+
+	// Read existing or create new settings
+	settings := map[string]interface{}{
+		"env": map[string]string{},
+		"skipDangerousModePermissionPrompt": true,
+	}
+
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			log.Printf("[WARN] Failed to parse existing settings: %v", err)
+		}
+	}
+
+	// Update env vars
+	env := map[string]string{}
+	if existingEnv, ok := settings["env"].(map[string]interface{}); ok {
+		for k, v := range existingEnv {
+			if strVal, ok := v.(string); ok {
+				env[k] = strVal
+			}
+		}
+	}
+
+	// Set custom env vars from environment
+	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+		env["ANTHROPIC_AUTH_TOKEN"] = apiKey
+	}
+	if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = baseURL
+	}
+	if model := os.Getenv("CLAUDE_MODEL"); model != "" {
+		env["ANTHROPIC_MODEL"] = model
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+		env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+	}
+	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+
+	settings["env"] = env
+
+	// Write back
+	newData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		log.Printf("[WARN] Failed to marshal settings: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+		log.Printf("[WARN] Failed to write settings: %v", err)
+		return
+	}
+
+	log.Printf("[INIT] Claude settings initialized at %s", settingsPath)
+}
+
 func NewService() *Service {
 	gh := NewGitHub(*githubToken)
 	return &Service{
@@ -199,6 +270,9 @@ func main() {
 	if err := os.MkdirAll(svc.workDir, 0755); err != nil {
 		log.Fatalf("Failed to create work directory: %v", err)
 	}
+
+	// Initialize Claude settings.json
+	initClaudeSettings()
 
 	// HTTP handlers
 	http.HandleFunc("/run", svc.handleRun)
@@ -436,6 +510,41 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 
 	// Run Claude Code
 	log.Printf("[EXEC] Running Claude Code: %s", truncate(task.Task, 100))
+
+	// Update Claude settings.json with custom env vars
+	settingsPath := filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		var settings map[string]interface{}
+		if err := json.Unmarshal(data, &settings); err == nil {
+			env := map[string]string{}
+			if existingEnv, ok := settings["env"].(map[string]interface{}); ok {
+				for k, v := range existingEnv {
+					if strVal, ok := v.(string); ok {
+						env[k] = strVal
+					}
+				}
+			}
+			// Set custom env vars
+			if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+				env["ANTHROPIC_AUTH_TOKEN"] = apiKey
+			}
+			if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
+				env["ANTHROPIC_BASE_URL"] = baseURL
+			}
+			if model := os.Getenv("CLAUDE_MODEL"); model != "" {
+				env["ANTHROPIC_MODEL"] = model
+				env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+				env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+				env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+				env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+			}
+			env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+			settings["env"] = env
+			if newData, err := json.MarshalIndent(settings, "", "  "); err == nil {
+				os.WriteFile(settingsPath, newData, 0644)
+			}
+		}
+	}
 
 	claudeCmd := exec.Command("claude", "--dangerously-skip-permissions", task.Task)
 	claudeCmd.Dir = worktreePath
