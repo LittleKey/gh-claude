@@ -34,6 +34,7 @@ Claude Code Runner Service - 通过 GitHub Webhook 自动执行 Claude Code 任�
 ### 3. 触发任务的方式
 
 **方式一: Issue 评论**
+
 ```
 @claude 修复这个bug: 当用户登录失败时没有显示错误提示
 ```
@@ -43,6 +44,7 @@ Claude Code Runner Service - 通过 GitHub Webhook 自动执行 Claude Code 任�
 
 **方式三: PR Review Comment**
 在 PR 上添加评论:
+
 ```
 /claude 重构这个函数的命名使其更清晰
 ```
@@ -51,7 +53,7 @@ Claude Code Runner Service - 通过 GitHub Webhook 自动执行 Claude Code 任�
 
 ### 环境要求
 
-- Go 1.21+
+- Go 1.26+
 - Git
 - Claude Code CLI (`claude` 命令)
 - GitHub Token
@@ -122,14 +124,14 @@ sudo systemctl start gh-claude
 
 ## API 接口
 
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/run` | POST | 提交新任务 |
-| `/status` | GET | 查询任务状态 |
-| `/queue` | GET | 查看任务队列 |
-| `/cancel` | POST | 取消任务 |
+| 接口       | 方法 | 说明                  |
+| ---------- | ---- | --------------------- |
+| `/run`     | POST | 提交新任务            |
+| `/status`  | GET  | 查询任务状态          |
+| `/queue`   | GET  | 查看任务队列          |
+| `/cancel`  | POST | 取消任务              |
 | `/webhook` | POST | GitHub Webhook 接收器 |
-| `/health` | GET | 健康检查 |
+| `/health`  | GET  | 健康检查              |
 
 ### 提交任务示例
 
@@ -154,10 +156,10 @@ curl -X POST http://localhost:3456/run \
 
 ## 配置说明
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-port` | 3456 | HTTP 服务端口 |
-| `-work-dir` | /tmp/claude-runner | Worktree 存储目录 |
-| `-max-concurrent` | 5 | 最大并发任务数 |
-| `-github-token` | 环境变量 GH_TOKEN | GitHub 访问令牌 |
-| `-webhook-url` | 空 | 任务完成后的回调 URL |
+| 参数              | 默认值             | 说明                 |
+| ----------------- | ------------------ | -------------------- |
+| `-port`           | 3456               | HTTP 服务端口        |
+| `-work-dir`       | /tmp/claude-runner | Worktree 存储目录    |
+| `-max-concurrent` | 5                  | 最大并发任务数       |
+| `-github-token`   | 环境变量 GH_TOKEN  | GitHub 访问令牌      |
+| `-webhook-url`    | 空                 | 任务完成后的回调 URL |
