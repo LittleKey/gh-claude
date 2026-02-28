@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,12 +83,28 @@ func (g *GitHub) RemovePRReaction(owner, repo string, prNumber int, reactionID i
 	return err
 }
 
-// Add comment to PR
-func (g *GitHub) AddPRComment(owner, repo string, prNumber int, body string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", owner, repo, prNumber)
-	payload := fmt.Sprintf(`{"body":"%s"}`, body)
-	_, err := g.do("POST", url, []byte(payload))
-	return err
+// Add comment to PR or Issue using gh CLI
+func (g *GitHub) AddPRComment(owner, repo string, prNumber int, body string, branch string) error {
+	repoFullName := owner + "/" + repo
+	var cmd *exec.Cmd
+
+	// Determine if this is a PR or issue comment based on branch name
+	if strings.HasPrefix(branch, "pr-") {
+		// PR comment
+		cmd = exec.Command("gh", "pr", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
+	} else {
+		// Issue comment
+		cmd = exec.Command("gh", "issue", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
+	}
+
+	cmd.Dir = "/"
+	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to add comment: %v, output: %s", err, string(output))
+	}
+	return nil
 }
 
 // Get PR info
@@ -602,11 +619,15 @@ func (s *Service) notifyGitHub(task *Task, success bool) {
 			task.Branch, truncate(task.Error, 500), truncate(task.Task, 200))
 	}
 
-	// Add comment to PR
-	if err := s.github.AddPRComment(owner, repo, task.PR, comment); err != nil {
-		log.Printf("[GITHUB] Failed to add comment to PR #%d: %v", task.PR, err)
+	// Add comment to PR or Issue
+	target := "PR"
+	if strings.HasPrefix(task.Branch, "fix-issue-") {
+		target = "Issue"
+	}
+	if err := s.github.AddPRComment(owner, repo, task.PR, comment, task.Branch); err != nil {
+		log.Printf("[GITHUB] Failed to add comment to %s #%d: %v", target, task.PR, err)
 	} else {
-		log.Printf("[GITHUB] Added completion comment to PR #%d", task.PR)
+		log.Printf("[GITHUB] Added completion comment to %s #%d", target, task.PR)
 	}
 }
 
@@ -785,12 +806,18 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 					if issue, ok := payload["issue"].(map[string]interface{}); ok {
 						if n, ok := issue["number"].(float64); ok {
 							prNum = int(n)
-							branch = fmt.Sprintf("fix-issue-%d", prNum)
-						}
-						if r, ok := issue["repository"].(map[string]interface{}); ok {
-							if fullName, ok := r["full_name"].(string); ok {
-								repo = fullName
+							// Check if this is a PR comment or issue comment
+							if pr, ok := issue["pull_request"].(map[string]interface{}); ok && pr != nil {
+								branch = fmt.Sprintf("pr-%d", prNum)
+							} else {
+								branch = fmt.Sprintf("fix-issue-%d", prNum)
 							}
+						}
+					}
+					// repository is at payload level, not under issue
+					if r, ok := payload["repository"].(map[string]interface{}); ok {
+						if fullName, ok := r["full_name"].(string); ok {
+							repo = fullName
 						}
 					}
 				}
