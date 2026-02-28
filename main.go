@@ -437,7 +437,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	// Run Claude Code
 	log.Printf("[EXEC] Running Claude Code: %s", truncate(task.Task, 100))
 
-	claudeCmd := exec.Command("claude", "--dangerously-skip-permissions", "--dangerously-force-cli", task.Task)
+	claudeCmd := exec.Command("claude", "--dangerously-skip-permissions", task.Task)
 	claudeCmd.Dir = worktreePath
 	claudeCmd.Env = append(os.Environ(),
 		"CLAUDE_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),

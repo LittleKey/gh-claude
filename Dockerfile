@@ -35,9 +35,18 @@ RUN CLAUDE_VERSION=$(curl -fsSL https://storage.googleapis.com/claude-code-dist-
     curl -fsSL "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude" -o /usr/local/bin/claude && \
     chmod +x /usr/local/bin/claude
 
+# Create non-root user
+RUN useradd -m -s /bin/bash appuser
+
 WORKDIR /app
 
 COPY --from=builder /app/gh-claude .
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
 
 EXPOSE 3456
 
