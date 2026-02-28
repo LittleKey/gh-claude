@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  gh-claude:
+    build: .
+    container_name: gh-claude
+    ports:
+      - "3456:3456"
+    volumes:
+      - claude-worktrees:/tmp/claude-runner
+    environment:
+      - GH_TOKEN=${GH_TOKEN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+
+volumes:
+  claude-worktrees:
