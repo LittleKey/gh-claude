@@ -26,9 +26,14 @@ RUN --mount=type=cache,target="/root/.cache/go-build" CGO_ENABLED=0 GOOS=linux G
     -trimpath \
     -o gh-claude
 
-FROM alpine:3.19
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache git ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI from Google Cloud Storage (use glibc version)
+RUN CLAUDE_VERSION=$(curl -fsSL https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest) && \
+    curl -fsSL "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude" -o /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude
 
 WORKDIR /app
 
