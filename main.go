@@ -426,6 +426,14 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		"CLAUDE_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),
 		"GITHUB_TOKEN="+s.github.token,
 	)
+	// Add custom API base URL if set
+	if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
+		claudeCmd.Env = append(claudeCmd.Env, "CLAUDE_API_BASE_URL="+baseURL)
+	}
+	// Add custom model if set
+	if model := os.Getenv("CLAUDE_MODEL"); model != "" {
+		claudeCmd.Env = append(claudeCmd.Env, "CLAUDE_MODEL="+model)
+	}
 
 	output, err := claudeCmd.CombinedOutput()
 

@@ -1,14 +1,13 @@
-version: "3.8"
-
 services:
   gh-claude:
     build: .
     container_name: gh-claude
-    ports:
-      - "3456:3456"
+    network_mode: host
     volumes:
       - /tmp/claude-runner:/tmp/claude-runner
     environment:
       - GH_TOKEN=${GH_TOKEN}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_API_BASE_URL=${CLAUDE_API_BASE_URL}
+      - CLAUDE_MODEL=${CLAUDE_MODEL}
     restart: unless-stopped
