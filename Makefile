@@ -1,7 +1,7 @@
-.PHONY: build clean
-
+.PHONY: build
 build:
-	go build -o gh-claude main.go
+	go build -ldflags "-s -w" -trimpath -o gh-claude main.go
 
+.PHONY: clean
 clean:
 	rm -f gh-claude
