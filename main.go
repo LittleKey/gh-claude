@@ -495,6 +495,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 
 	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		log.Printf("[EXEC] ERROR: failed to create worktree dir: %v", err)
 		task.Status = "failed"
 		task.Error = "failed to create worktree dir: " + err.Error()
 		task.EndedAt = time.Now()
@@ -514,6 +515,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	if !worktreeExists {
 		// Need to create worktree
 		if err := s.setupWorktree(task, mainRepoPath, worktreePath); err != nil {
+			log.Printf("[EXEC] ERROR: failed to setup worktree: %v", err)
 			task.Status = "failed"
 			task.Error = "failed to setup worktree: " + err.Error()
 			task.EndedAt = time.Now()
@@ -579,12 +581,14 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	output, err := claudeCmd.CombinedOutput()
 
 	if len(output) > 0 {
+		log.Printf("[EXEC] Claude output: %s", truncate(string(output), 500))
 		task.Result = string(output)
 	}
 
 	task.EndedAt = time.Now()
 
 	if err != nil {
+		log.Printf("[EXEC] Claude command error: %v", err)
 		task.Status = "failed"
 		task.Error = fmt.Sprintf("claude error: %v\n%s", err, string(output))
 		// Notify GitHub of failure
@@ -716,6 +720,27 @@ func (s *Service) createPRIfNeeded(task *Task) {
 	}
 
 	log.Printf("[PR] Successfully created PR for branch %s", task.Branch)
+}
+
+// getPRBranch gets the actual branch name for a PR using GitHub API
+func (s *Service) getPRBranch(repo string, prNum int) string {
+	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(prNum), "--json", "headRefName", "-R", repo)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[WEBHOOK] Failed to get PR #%d branch: %v, output: %s", prNum, err, string(output))
+		return ""
+	}
+
+	var result struct {
+		HeadRefName string `json:"headRefName"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		log.Printf("[WEBHOOK] Failed to parse PR branch: %v", err)
+		return ""
+	}
+
+	log.Printf("[WEBHOOK] Got PR #%d branch: %s", prNum, result.HeadRefName)
+	return result.HeadRefName
 }
 
 func (s *Service) pushChanges(task *Task) {
@@ -989,7 +1014,13 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 							prNum = int(n)
 							// Check if this is a PR comment or issue comment
 							if pr, ok := issue["pull_request"].(map[string]interface{}); ok && pr != nil {
-								branch = fmt.Sprintf("pr-%d", prNum)
+								// For PR comments, get the actual branch from GitHub API
+								if r, ok := payload["repository"].(map[string]interface{}); ok {
+									if fullName, ok := r["full_name"].(string); ok {
+										branch = s.getPRBranch(fullName, prNum)
+									}
+								}
+								// Note: If branch is empty, we fail later in the check
 							} else {
 								branch = fmt.Sprintf("fix-issue-%d", prNum)
 							}
@@ -1034,19 +1065,26 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
 			if n, ok := pr["number"].(float64); ok {
 				prNum = int(n)
-				branch = fmt.Sprintf("pr-%d", prNum)
 			}
+			// Get repository full name first
+			var repoFullName string
+			if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
+				if fullName, ok := r["full_name"].(string); ok {
+					repoFullName = fullName
+					repo = fullName
+				}
+			}
+			// Get actual branch name from GitHub API
+			if repoFullName != "" && prNum > 0 {
+				branch = s.getPRBranch(repoFullName, prNum)
+			}
+			// Note: If branch is empty, we fail later in the check
 			// Extract PR title and body for context
 			if title, ok := pr["title"].(string); ok {
 				prTitle = title
 			}
 			if b, ok := pr["body"].(string); ok {
 				prBody = b
-			}
-			if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
-				if fullName, ok := r["full_name"].(string); ok {
-					repo = fullName
-				}
 			}
 		}
 		if review, ok := payload["review"].(map[string]interface{}); ok {
@@ -1074,19 +1112,26 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
 				if n, ok := pr["number"].(float64); ok {
 					prNum = int(n)
-					branch = fmt.Sprintf("pr-%d", prNum)
 				}
+				// Get repository full name first
+				var repoFullName string
+				if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
+					if fullName, ok := r["full_name"].(string); ok {
+						repoFullName = fullName
+						repo = fullName
+					}
+				}
+				// Get actual branch name from GitHub API
+				if repoFullName != "" && prNum > 0 {
+					branch = s.getPRBranch(repoFullName, prNum)
+				}
+				// Note: If branch is empty, we fail later in the check
 				// Extract PR title and body for context
 				if title, ok := pr["title"].(string); ok {
 					prTitle = title
 				}
 				if b, ok := pr["body"].(string); ok {
 					prBody = b
-				}
-				if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
-					if fullName, ok := r["full_name"].(string); ok {
-						repo = fullName
-					}
 				}
 			}
 			// Build task description with context
@@ -1108,6 +1153,16 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	if repo == "" || taskDesc == "" {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ignored"})
+		return
+	}
+
+	// For PR comments, if branch is not found, fail the task
+	if prNum > 0 && branch == "" {
+		log.Printf("[WEBHOOK] PR branch not found for PR #%d, skipping task", prNum)
+		json.NewEncoder(w).Encode(Response{
+			Success: false,
+			Error:   fmt.Sprintf("PR branch not found for PR #%d", prNum),
+		})
 		return
 	}
 
