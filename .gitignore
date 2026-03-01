@@ -1,2 +1,4 @@
 gh-claude
 .env
+/worktrees
+/data

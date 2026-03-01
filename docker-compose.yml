@@ -4,8 +4,8 @@ services:
     container_name: gh-claude
     network_mode: host
     volumes:
-      - /tmp/claude-runner:/tmp/claude-runner
-      - /tmp/claude-data:/tmp/claude-data
+      - ./worktrees:/tmp/claude-runner
+      - ./data:/tmp/claude-data
     environment:
       - GH_TOKEN=${GH_TOKEN}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
