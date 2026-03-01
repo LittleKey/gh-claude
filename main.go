@@ -11,6 +11,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -171,10 +172,12 @@ type Service struct {
 	branchLocks   map[string]*BranchLock // "repo:branch" -> BranchLock
 	taskQueue     []*Task                // Global queue for unassigned tasks
 	workDir       string
+	dataDir       string
 	maxConcurrent int
 	github        *GitHub
 	webhookURL    string
 	activeCount   int
+	db            *sql.DB
 }
 
 // Initialize Claude settings.json with custom env vars
@@ -262,27 +265,49 @@ func initClaudeSettings() {
 	}
 }
 
-func NewService() *Service {
+func NewService(db *sql.DB, dataDir string) *Service {
 	gh := NewGitHub(*githubToken)
 	return &Service{
 		tasks:         make(map[string]*Task),
 		branchLocks:   make(map[string]*BranchLock),
 		taskQueue:     make([]*Task, 0),
 		workDir:       *workDir,
+		dataDir:       dataDir,
 		maxConcurrent: *maxConcurrent,
 		github:        gh,
 		webhookURL:    *webhookURL,
+		db:            db,
 	}
 }
 
 func main() {
 	flag.Parse()
 
-	svc := NewService()
+	// Data directory for SQLite database
+	dataDir := "/tmp/claude-data"
+
+	// Initialize database
+	db, err := InitDB(dataDir)
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+
+	svc := NewService(db, dataDir)
 
 	// Create base work directory
 	if err := os.MkdirAll(svc.workDir, 0o755); err != nil {
 		log.Fatalf("Failed to create work directory: %v", err)
+	}
+
+	// Restore pending tasks from database
+	pendingTasks, err := LoadPendingTasks(db)
+	if err != nil {
+		log.Printf("[WARN] Failed to load pending tasks: %v", err)
+	} else {
+		for _, task := range pendingTasks {
+			svc.restoreTask(task)
+		}
 	}
 
 	// Initialize Claude settings.json
@@ -429,6 +454,13 @@ func (s *Service) submitTask(task *Task) {
 
 	s.tasks[task.ID] = task
 
+	// Save to database
+	if s.db != nil {
+		if err := SaveTask(s.db, task); err != nil {
+			log.Printf("[WARN] Failed to save task to database: %v", err)
+		}
+	}
+
 	// Get or create branch lock
 	lockKey := fmt.Sprintf("%s:%s", task.Repo, task.Branch)
 	bl, exists := s.branchLocks[lockKey]
@@ -450,6 +482,40 @@ func (s *Service) submitTask(task *Task) {
 		// Can run immediately
 		s.taskQueue = append(s.taskQueue, task)
 		log.Printf("[QUEUE] Task %s submitted for branch %s:%s", task.ID, task.Repo, task.Branch)
+	}
+}
+
+// restoreTask restores a task from database to memory (without re-adding GitHub reaction)
+func (s *Service) restoreTask(task *Task) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.tasks[task.ID] = task
+
+	// Get or create branch lock
+	lockKey := fmt.Sprintf("%s:%s", task.Repo, task.Branch)
+	bl, exists := s.branchLocks[lockKey]
+	if !exists {
+		bl = &BranchLock{
+			queue: make([]*Task, 0),
+		}
+		s.branchLocks[lockKey] = bl
+	}
+
+	bl.mu.Lock()
+	defer bl.mu.Unlock()
+
+	// For restored tasks, reset status to queued and add to queue
+	task.Status = "queued"
+
+	if bl.running != nil {
+		// Branch is busy, add to queue
+		bl.queue = append(bl.queue, task)
+		log.Printf("[RESTORE] Task %s restored to queue for branch %s:%s", task.ID, task.Repo, task.Branch)
+	} else {
+		// Can run immediately
+		s.taskQueue = append(s.taskQueue, task)
+		log.Printf("[RESTORE] Task %s restored for branch %s:%s", task.ID, task.Repo, task.Branch)
 	}
 }
 
@@ -487,6 +553,13 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 
 	task.Status = "running"
 	task.StartedAt = time.Now()
+
+	// Save task status to database
+	if s.db != nil {
+		if err := SaveTask(s.db, task); err != nil {
+			log.Printf("[WARN] Failed to save task status to database: %v", err)
+		}
+	}
 
 	// Create worktree path: /tmp/claude-runner/{owner-repo}/{branch}
 	repoSafe := strings.ReplaceAll(task.Repo, "/", "-")
@@ -866,6 +939,13 @@ func (s *Service) completeTask(task *Task, bl *BranchLock, lockKey string) {
 	}
 
 	s.mu.Unlock()
+
+	// Save final task status to database
+	if s.db != nil {
+		if err := SaveTask(s.db, task); err != nil {
+			log.Printf("[WARN] Failed to save task completion to database: %v", err)
+		}
+	}
 
 	duration := task.EndedAt.Sub(task.StartedAt)
 	log.Printf("[DONE] Task %s: %s (duration: %v)", task.ID, task.Status, duration)
