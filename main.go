@@ -817,8 +817,15 @@ func (s *Service) notifyGitHub(task *Task, success bool) {
 	var comment string
 	if success {
 		duration := task.EndedAt.Sub(task.StartedAt)
-		comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\nTask: %s\nDuration: %v",
-			task.Branch, truncate(task.Task, 200), duration)
+		// Use Claude's result output as the completion message
+		resultSummary := truncate(task.Result, 1000)
+		if resultSummary != "" {
+			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\n**Result:**\n%s\n\nDuration: %v",
+				task.Branch, resultSummary, duration)
+		} else {
+			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\nDuration: %v",
+				task.Branch, duration)
+		}
 	} else {
 		comment = fmt.Sprintf("❌ **Task Failed**\n\nBranch `%s`\n\nError: %s\n\nTask: %s",
 			task.Branch, truncate(task.Error, 500), truncate(task.Task, 200))
