@@ -667,6 +667,57 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 	return nil
 }
 
+// createPRIfNeeded creates a PR if it doesn't exist for issue-based branches
+func (s *Service) createPRIfNeeded(task *Task) {
+	// Extract issue number from branch name (e.g., fix-issue-2 -> 2)
+	issueNum := 0
+	if _, err := fmt.Sscanf(task.Branch, "fix-issue-%d", &issueNum); err != nil {
+		log.Printf("[PR] Failed to extract issue number from branch %s: %v", task.Branch, err)
+		return
+	}
+
+	// Check if PR already exists
+	parts := strings.Split(task.Repo, "/")
+	if len(parts) != 2 {
+		log.Printf("[PR] Invalid repo format: %s", task.Repo)
+		return
+	}
+	owner, repo := parts[0], parts[1]
+
+	// Use gh CLI to check if PR exists and create if not
+	prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, issueNum)
+	checkCmd := exec.Command("gh", "pr", "view", strconv.Itoa(issueNum), "--json", "url", "-R", task.Repo)
+	_, err := checkCmd.CombinedOutput()
+
+	if err == nil {
+		// PR already exists
+		log.Printf("[PR] PR #%d already exists: %s", issueNum, prURL)
+		return
+	}
+
+	// PR doesn't exist, create it
+	log.Printf("[PR] Creating PR for issue #%d from branch %s", issueNum, task.Branch)
+
+	// Get issue title for PR title
+	title := fmt.Sprintf("Fix issue #%d", issueNum)
+	body := fmt.Sprintf("This PR fixes issue #%d\n\nTask: %s", issueNum, truncate(task.Task, 200))
+
+	createCmd := exec.Command("gh", "pr", "create",
+		"--title", title,
+		"--body", body,
+		"--base", "main",
+		"--head", task.Branch,
+		"-R", task.Repo,
+	)
+	createOutput, err := createCmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[PR] Failed to create PR: %v, output: %s", err, string(createOutput))
+		return
+	}
+
+	log.Printf("[PR] Successfully created PR for branch %s", task.Branch)
+}
+
 func (s *Service) pushChanges(task *Task) {
 	if task.WorkTree == "" || task.Status != "completed" {
 		return
@@ -713,6 +764,11 @@ func (s *Service) pushChanges(task *Task) {
 		task.Status = "failed"
 	} else {
 		log.Printf("[PUSH] Successfully pushed branch %s for task %s", task.Branch, task.ID)
+
+		// Create PR if it doesn't exist (for issue-based branches)
+		if strings.HasPrefix(task.Branch, "fix-issue-") {
+			s.createPRIfNeeded(task)
+		}
 	}
 }
 
