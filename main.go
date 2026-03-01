@@ -188,14 +188,14 @@ func initClaudeSettings() {
 	settingsPath := filepath.Join(settingsDir, "settings.json")
 
 	// Create directory if not exists
-	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
 		log.Printf("[WARN] Failed to create settings directory: %v", err)
 		return
 	}
 
 	// Read existing or create new settings
 	settings := map[string]interface{}{
-		"env": map[string]string{},
+		"env":                               map[string]string{},
 		"skipDangerousModePermissionPrompt": true,
 	}
 
@@ -240,12 +240,26 @@ func initClaudeSettings() {
 		return
 	}
 
-	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+	if err := os.WriteFile(settingsPath, newData, 0o644); err != nil {
 		log.Printf("[WARN] Failed to write settings: %v", err)
 		return
 	}
 
 	log.Printf("[INIT] Claude settings initialized at %s", settingsPath)
+
+	// Configure git safe.directory to allow all directories
+	cmd := exec.Command("git", "config", "--global", "--add", "safe.directory", "*")
+	cmd.Run()
+
+	// Configure git SSL (use system certs)
+	cmd = exec.Command("git", "config", "--global", "http.sslCAInfo", "/etc/ssl/certs/ca-certificates.crt")
+	cmd.Run()
+
+	// Ensure work directory exists
+	workDir := "/tmp/claude-runner"
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		log.Printf("[WARN] Failed to create work directory: %v", err)
+	}
 }
 
 func NewService() *Service {
@@ -267,7 +281,7 @@ func main() {
 	svc := NewService()
 
 	// Create base work directory
-	if err := os.MkdirAll(svc.workDir, 0755); err != nil {
+	if err := os.MkdirAll(svc.workDir, 0o755); err != nil {
 		log.Fatalf("Failed to create work directory: %v", err)
 	}
 
@@ -480,7 +494,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	task.WorkTree = worktreePath
 
 	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(worktreePath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
 		task.Status = "failed"
 		task.Error = "failed to create worktree dir: " + err.Error()
 		task.EndedAt = time.Now()
@@ -541,16 +555,17 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 			env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 			settings["env"] = env
 			if newData, err := json.MarshalIndent(settings, "", "  "); err == nil {
-				os.WriteFile(settingsPath, newData, 0644)
+				os.WriteFile(settingsPath, newData, 0o644)
 			}
 		}
 	}
 
+	// Run Claude with proper environment
 	claudeCmd := exec.Command("claude", "--dangerously-skip-permissions", task.Task)
 	claudeCmd.Dir = worktreePath
 	claudeCmd.Env = append(os.Environ(),
 		"CLAUDE_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),
-		"GITHUB_TOKEN="+s.github.token,
+		"ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),
 	)
 	// Add custom API base URL if set
 	if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
@@ -911,7 +926,8 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if body, ok := comment["body"].(string); ok {
 				// Check for @claude command
 				if strings.Contains(body, "@claude") || strings.HasPrefix(strings.TrimSpace(body), "/claude") {
-					taskDesc = extractTask(body)
+					// Get issue/PR context (title and body)
+					var issueTitle, issueBody string
 					if issue, ok := payload["issue"].(map[string]interface{}); ok {
 						if n, ok := issue["number"].(float64); ok {
 							prNum = int(n)
@@ -922,7 +938,31 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 								branch = fmt.Sprintf("fix-issue-%d", prNum)
 							}
 						}
+						// Extract title and body for context
+						if title, ok := issue["title"].(string); ok {
+							issueTitle = title
+						}
+						if b, ok := issue["body"].(string); ok {
+							issueBody = b
+						}
 					}
+
+					// Build task description with context
+					taskCmd := extractTask(body)
+					if issueTitle != "" || issueBody != "" {
+						var context strings.Builder
+						if issueTitle != "" {
+							context.WriteString(fmt.Sprintf("Issue/PR Title: %s\n\n", issueTitle))
+						}
+						if issueBody != "" {
+							context.WriteString(fmt.Sprintf("Issue/PR Description:\n%s\n\n", issueBody))
+						}
+						context.WriteString(fmt.Sprintf("User Command:\n%s", taskCmd))
+						taskDesc = context.String()
+					} else {
+						taskDesc = taskCmd
+					}
+
 					// repository is at payload level, not under issue
 					if r, ok := payload["repository"].(map[string]interface{}); ok {
 						if fullName, ok := r["full_name"].(string); ok {
@@ -934,10 +974,18 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "pull_request_review":
+		var prTitle, prBody string
 		if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
 			if n, ok := pr["number"].(float64); ok {
 				prNum = int(n)
 				branch = fmt.Sprintf("pr-%d", prNum)
+			}
+			// Extract PR title and body for context
+			if title, ok := pr["title"].(string); ok {
+				prTitle = title
+			}
+			if b, ok := pr["body"].(string); ok {
+				prBody = b
 			}
 			if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
 				if fullName, ok := r["full_name"].(string); ok {
@@ -947,25 +995,57 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		if review, ok := payload["review"].(map[string]interface{}); ok {
 			if body, ok := review["body"].(string); ok {
-				taskDesc = body
+				// Build task description with context
+				var context strings.Builder
+				if prTitle != "" {
+					context.WriteString(fmt.Sprintf("PR Title: %s\n\n", prTitle))
+				}
+				if prBody != "" {
+					context.WriteString(fmt.Sprintf("PR Description:\n%s\n\n", prBody))
+				}
+				context.WriteString(fmt.Sprintf("Review Message:\n%s", body))
+				taskDesc = context.String()
 			}
 		}
 
 	case "pull_request_review_comment":
+		var prTitle, prBody string
 		if comment, ok := payload["comment"].(map[string]interface{}); ok {
+			commentBody := ""
 			if body, ok := comment["body"].(string); ok {
-				taskDesc = body
+				commentBody = body
 			}
 			if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
 				if n, ok := pr["number"].(float64); ok {
 					prNum = int(n)
 					branch = fmt.Sprintf("pr-%d", prNum)
 				}
+				// Extract PR title and body for context
+				if title, ok := pr["title"].(string); ok {
+					prTitle = title
+				}
+				if b, ok := pr["body"].(string); ok {
+					prBody = b
+				}
 				if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
 					if fullName, ok := r["full_name"].(string); ok {
 						repo = fullName
 					}
 				}
+			}
+			// Build task description with context
+			if prTitle != "" || prBody != "" {
+				var context strings.Builder
+				if prTitle != "" {
+					context.WriteString(fmt.Sprintf("PR Title: %s\n\n", prTitle))
+				}
+				if prBody != "" {
+					context.WriteString(fmt.Sprintf("PR Description:\n%s\n\n", prBody))
+				}
+				context.WriteString(fmt.Sprintf("Comment:\n%s", commentBody))
+				taskDesc = context.String()
+			} else {
+				taskDesc = commentBody
 			}
 		}
 	}

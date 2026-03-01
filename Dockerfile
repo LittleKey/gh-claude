@@ -28,7 +28,7 @@ RUN --mount=type=cache,target="/root/.cache/go-build" CGO_ENABLED=0 GOOS=linux G
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gh && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gh sudo && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI from Google Cloud Storage (use glibc version)
 RUN CLAUDE_VERSION=$(curl -fsSL https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest) && \
@@ -45,9 +45,8 @@ COPY --from=builder /app/gh-claude .
 # Set ownership
 RUN chown -R appuser:appuser /app
 
-# Switch to non-root user
-USER appuser
-
 EXPOSE 3456
+
+USER appuser
 
 CMD ["./gh-claude"]
