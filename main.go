@@ -646,7 +646,11 @@ func (s *Service) createPRIfNeeded(task *Task) {
 
 // getPRBranch gets the actual branch name for a PR using GitHub API
 func (s *Service) getPRBranch(repo string, prNum int) string {
-	branch := s.github.GetPRBranch(repo, prNum)
+	branch, err := s.github.GetPRBranch(repo, prNum)
+	if err != nil {
+		log.Printf("[WEBHOOK] Failed to get PR #%d branch: %v", prNum, err)
+		return ""
+	}
 	if branch != "" {
 		log.Printf("[WEBHOOK] Got PR #%d branch: %s", prNum, branch)
 	}

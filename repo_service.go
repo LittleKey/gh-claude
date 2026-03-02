@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -49,17 +50,27 @@ func (r *RepoService) SetupWorktree(repo, branch string, prNum int) (string, err
 		return "", fmt.Errorf("failed to create worktree dir: %w", err)
 	}
 
-	cloneURL := fmt.Sprintf("https://%s@github.com/%s.git", r.github.token, repo)
-
-	// Clone main repo if not exists
+	// Clone main repo if not exists using gh repo clone (handles auth automatically)
 	if _, err := os.Stat(mainRepoPath); os.IsNotExist(err) {
-		log.Printf("[GIT] Cloning %s to %s", repo, mainRepoPath)
-		cmd := exec.Command("git", "clone", "--bare", cloneURL, mainRepoPath)
+		log.Printf("[GH] Cloning %s to %s using gh", repo, mainRepoPath)
+		// gh repo clone doesn't support --bare, so we clone to a temp location first
+		tempClonePath := mainRepoPath + ".tmp"
+		cmd := exec.Command("gh", "repo", "clone", repo, tempClonePath)
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+r.github.token)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("failed to clone: %w", err)
+			return "", fmt.Errorf("failed to clone repo: %w", err)
 		}
+		// Convert to bare repo
+		cmd = exec.Command("git", "clone", "--bare", tempClonePath, mainRepoPath)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("failed to create bare repo: %w", err)
+		}
+		// Clean up temp clone
+		os.RemoveAll(tempClonePath)
 	}
 
 	// Determine base branch
@@ -73,11 +84,13 @@ func (r *RepoService) SetupWorktree(repo, branch string, prNum int) (string, err
 		}
 	}
 
-	// For PR, fetch the PR branch
+	// For PR, fetch the PR branch using gh
 	if prNum > 0 {
-		cmd = exec.Command("git", "fetch", "origin", fmt.Sprintf("pull/%d/head:pr-%d", prNum, prNum))
-		cmd.Dir = mainRepoPath
-		cmd.Run() // Ignore error, branch might not exist
+		// Use gh pr checkout to fetch PR branch - handles auth automatically
+		prCmd := exec.Command("gh", "pr", "checkout", strconv.Itoa(prNum), "--branch", fmt.Sprintf("pr-%d", prNum), "-R", repo)
+		prCmd.Dir = mainRepoPath
+		prCmd.Env = append(os.Environ(), "GH_TOKEN="+r.github.token)
+		prCmd.Run() // Ignore error, branch might not exist
 	}
 
 	// Create worktree

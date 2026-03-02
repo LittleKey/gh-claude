@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 // GithubService handles GitHub API interactions
@@ -21,71 +19,58 @@ func NewGithubService(token string) *GithubService {
 	return &GithubService{token: token}
 }
 
-func (g *GithubService) do(method, url string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-		req.Body = bytes.NewReader(body)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return respBody, fmt.Errorf("GitHub API error: %d - %s", resp.StatusCode, string(respBody))
-	}
-	return respBody, nil
+// repoFullName combines owner and repo into full repo name
+func (g *GithubService) repoFullName(owner, repo string) string {
+	return owner + "/" + repo
 }
 
-// AddPRReaction adds a reaction to a PR
+// runGhCmd runs a gh CLI command with proper token setup
+func (g *GithubService) runGhCmd(args ...string) (string, error) {
+	cmd := exec.Command("gh", args...)
+	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh command failed: %v, output: %s", err, string(output))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// runGhCmdWithRepo runs a gh CLI command with repo flag
+func (g *GithubService) runGhCmdWithRepo(repo, operation string, args ...string) (string, error) {
+	fullArgs := append(args, "-R", repo)
+	return g.runGhCmd(fullArgs...)
+}
+
+// AddPRReaction adds a reaction to a PR using gh CLI
 func (g *GithubService) AddPRReaction(owner, repo string, prNumber int, reaction string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reactions", owner, repo, prNumber)
-	payload := fmt.Sprintf(`{"content":"%s"}`, reaction)
-	_, err := g.do("POST", url, []byte(payload))
+	repoFullName := g.repoFullName(owner, repo)
+	_, err := g.runGhCmd("api", "-X", "POST",
+		fmt.Sprintf("repos/%s/%s/pulls/%d/reactions", owner, repo, prNumber),
+		"-f", "content="+reaction,
+		"-R", repoFullName)
 	return err
 }
 
-// RemovePRReaction removes a reaction from a PR
+// RemovePRReaction removes a reaction from a PR using gh CLI
 func (g *GithubService) RemovePRReaction(owner, repo string, prNumber int, reactionID int) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reactions/%d", owner, repo, prNumber, reactionID)
-	_, err := g.do("DELETE", url, nil)
+	repoFullName := g.repoFullName(owner, repo)
+	_, err := g.runGhCmd("api", "-X", "DELETE",
+		fmt.Sprintf("repos/%s/%s/pulls/%d/reactions/%d", owner, repo, prNumber, reactionID),
+		"-R", repoFullName)
 	return err
 }
 
-// GetCurrentUserID gets the current user ID from GitHub API
+// GetCurrentUserID gets the current user ID using gh CLI
 func (g *GithubService) GetCurrentUserID() (string, error) {
-	url := "https://api.github.com/user"
-	resp, err := g.do("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	var user map[string]interface{}
-	if err := json.Unmarshal(resp, &user); err != nil {
-		return "", err
-	}
-	if id, ok := user["id"].(float64); ok {
-		return strconv.FormatInt(int64(id), 10), nil
-	}
-	return "", nil
+	return g.runGhCmd("api", "user", "--jq", ".id")
 }
 
 // AddPRComment adds a comment to a PR using gh CLI
 func (g *GithubService) AddPRComment(owner, repo string, prNumber int, body string) error {
-	repoFullName := owner + "/" + repo
+	repoFullName := g.repoFullName(owner, repo)
 	cmd := exec.Command("gh", "pr", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
-
 	cmd.Dir = "/"
 	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
-
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to add comment: %v, output: %s", err, string(output))
@@ -95,12 +80,10 @@ func (g *GithubService) AddPRComment(owner, repo string, prNumber int, body stri
 
 // AddIssueComment adds a comment to an Issue using gh CLI
 func (g *GithubService) AddIssueComment(owner, repo string, issueNumber int, body string) error {
-	repoFullName := owner + "/" + repo
+	repoFullName := g.repoFullName(owner, repo)
 	cmd := exec.Command("gh", "issue", "comment", strconv.Itoa(issueNumber), "--body", body, "-R", repoFullName)
-
 	cmd.Dir = "/"
 	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
-
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to add issue comment: %v, output: %s", err, string(output))
@@ -108,61 +91,51 @@ func (g *GithubService) AddIssueComment(owner, repo string, issueNumber int, bod
 	return nil
 }
 
-// GetPR gets PR information
+// GetPR gets PR information using gh CLI
 func (g *GithubService) GetPR(owner, repo string, prNumber int) (map[string]interface{}, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, prNumber)
-	resp, err := g.do("GET", url, nil)
+	repoFullName := g.repoFullName(owner, repo)
+	output, err := g.runGhCmd("pr", "view", strconv.Itoa(prNumber), "--json",
+		"number,title,body,headRefName,baseRefName,url,state", "-R", repoFullName)
 	if err != nil {
 		return nil, err
 	}
 	var pr map[string]interface{}
-	if err := json.Unmarshal(resp, &pr); err != nil {
+	if err := json.Unmarshal([]byte(output), &pr); err != nil {
 		return nil, err
 	}
 	return pr, nil
 }
 
 // GetPRBranch gets the actual branch name for a PR using gh CLI
-func (g *GithubService) GetPRBranch(repo string, prNum int) string {
-	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(prNum), "--json", "headRefName", "-R", repo)
-	output, err := cmd.CombinedOutput()
+func (g *GithubService) GetPRBranch(repo string, prNum int) (string, error) {
+	output, err := g.runGhCmd("pr", "view", strconv.Itoa(prNum), "--json", "headRefName", "-R", repo)
 	if err != nil {
-		return ""
+		return "", err
 	}
-
 	var result struct {
 		HeadRefName string `json:"headRefName"`
 	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		return ""
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		return "", err
 	}
-
-	return result.HeadRefName
+	return result.HeadRefName, nil
 }
 
 // CreatePR creates a PR using gh CLI
 func (g *GithubService) CreatePR(owner, repo, branch, title, body, baseBranch string) error {
-	repoFullName := owner + "/" + repo
-	cmd := exec.Command("gh", "pr", "create",
+	repoFullName := g.repoFullName(owner, repo)
+	_, err := g.runGhCmd("pr", "create",
 		"--title", title,
 		"--body", body,
 		"--base", baseBranch,
 		"--head", branch,
-		"-R", repoFullName,
-	)
-	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to create PR: %v, output: %s", err, string(output))
-	}
-	return nil
+		"-R", repoFullName)
+	return err
 }
 
 // PRExists checks if a PR exists for an issue/PR number
 func (g *GithubService) PRExists(owner, repo string, num int) bool {
-	repoFullName := owner + "/" + repo
-	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(num), "--json", "url", "-R", repoFullName)
-	_, err := cmd.CombinedOutput()
+	repoFullName := g.repoFullName(owner, repo)
+	_, err := g.runGhCmd("pr", "view", strconv.Itoa(num), "--json", "url", "-R", repoFullName)
 	return err == nil
 }
