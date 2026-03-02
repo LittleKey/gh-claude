@@ -631,6 +631,11 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		}
 	}
 
+	// Sync worktree with remote and resolve any conflicts
+	if err := s.syncWorktree(task, worktreePath); err != nil {
+		log.Printf("[WARN] Failed to sync worktree: %v", err)
+	}
+
 	// Run Claude Code
 	log.Printf("[EXEC] Running Claude Code: %s", truncate(task.Task, 100))
 
@@ -812,6 +817,67 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 	remoteCmd.Dir = worktreePath
 	if err := remoteCmd.Run(); err != nil {
 		log.Printf("[WARN] Failed to set remote URL with credentials: %v", err)
+	}
+
+	return nil
+}
+
+// syncWorktree syncs the worktree with remote and resolves any conflicts
+func (s *Service) syncWorktree(task *Task, worktreePath string) error {
+	log.Printf("[GIT] Syncing worktree at %s with remote", worktreePath)
+
+	// Fetch latest changes
+	cmd := exec.Command("git", "fetch", "origin")
+	cmd.Dir = worktreePath
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Printf("[WARN] Failed to fetch in worktree: %v", err)
+		// Continue anyway, might work with local state
+	}
+
+	// Get current branch name
+	cmd = exec.Command("git", "branch", "--show-current")
+	cmd.Dir = worktreePath
+	branch, err := cmd.Output()
+	if err != nil {
+		log.Printf("[WARN] Failed to get current branch: %v", err)
+		return nil // Not critical, continue
+	}
+	branch = []byte(strings.TrimSpace(string(branch)))
+
+	if len(branch) == 0 {
+		log.Printf("[WARN] No current branch in worktree")
+		return nil
+	}
+
+	// Check if there are any changes to pull
+	cmd = exec.Command("git", "rev-list", "--count", fmt.Sprintf("HEAD..origin/%s", string(branch)))
+	cmd.Dir = worktreePath
+	behindCount, err := cmd.Output()
+	if err == nil {
+		count := strings.TrimSpace(string(behindCount))
+		if count != "0" {
+			log.Printf("[GIT] Branch %s is behind origin/%s by %s commits, pulling...", string(branch), string(branch), count)
+			cmd = exec.Command("git", "pull", "--rebase", "origin", string(branch))
+			cmd.Dir = worktreePath
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Printf("[WARN] Failed to pull changes: %v", err)
+				// Try to rebase or reset to remote
+				log.Printf("[GIT] Attempting to reset to origin/%s", string(branch))
+				cmd = exec.Command("git", "reset", "--hard", fmt.Sprintf("origin/%s", string(branch)))
+				cmd.Dir = worktreePath
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					log.Printf("[ERROR] Failed to reset to origin/%s: %v", string(branch), err)
+				}
+			}
+		} else {
+			log.Printf("[GIT] Branch %s is up to date with origin/%s", string(branch), string(branch))
+		}
 	}
 
 	return nil
