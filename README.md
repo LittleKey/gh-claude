@@ -1,77 +1,79 @@
 # gh-claude
 
-Claude Code Runner Service - 通过 GitHub Webhook 自动执行 Claude Code 任务的工具。
+Claude Code Runner Service - A tool that automatically executes Claude Code tasks via GitHub Webhooks.
 
-## 功能特性
+> **中文**: 此页面也有 [中文版](README_zh.md) 文档。
 
-- **GitHub Webhook 集成**: 监听 Issue 和 PR 评论，自动触发任务
-- **Git Worktree 隔离**: 每个分支使用独立的 worktree，避免冲突
-- **分支级锁**: 同一分支同时只能执行一个任务
-- **并发控制**: 支持配置最大并发任务数
-- **自动推送**: 任务完成后自动提交并推送代码
-- **PR 状态同步**: 在 PR 上添加评论反馈任务执行结果
+## Features
 
-## GitHub 配置
+- **GitHub Webhook Integration**: Listens to Issue and PR comments, automatically triggering tasks
+- **Git Worktree Isolation**: Each branch uses an independent worktree to avoid conflicts
+- **Branch-level Locking**: Only one task can run per branch at a time
+- **Concurrent Control**: Configurable maximum concurrent tasks
+- **Auto-push**: Automatically commits and pushes changes after task completion
+- **PR Status Sync**: Comments on PRs with task execution results
 
-### 1. 创建 Personal Access Token
+## GitHub Setup
 
-1. 访问 GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
-2. 生成新令牌，需要权限:
-   - `repo` (完整仓库访问)
-   - `workflow` (如果需要触发 GitHub Actions)
+### 1. Create Personal Access Token
 
-### 2. 配置 Webhook
+1. Go to GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
+2. Generate a new token with the following permissions:
+   - `repo` (full repository access)
+   - `workflow` (if you need to trigger GitHub Actions)
 
-1. 进入仓库 → Settings → Webhooks → Add webhook
-2. 配置以下选项:
-   - **Payload URL**: `http://你的服务器IP:3456/webhook`
+### 2. Configure Webhook
+
+1. Go to Repository → Settings → Webhooks → Add webhook
+2. Configure the following:
+   - **Payload URL**: `http://your-server-ip:3456/webhook`
    - **Content type**: `application/json`
-   - **Events**: 选择以下:
+   - **Events**: Select the following:
      - `Issue comments`
      - `Pull request reviews`
      - `Pull request review comments`
 
-### 3. 触发任务的方式
+### 3. How to Trigger Tasks
 
-**方式一: Issue 评论**
-
-```
-@claude 修复这个bug: 当用户登录失败时没有显示错误提示
-```
-
-**方式二: PR Review**
-在 PR Review 中添加任务描述
-
-**方式三: PR Review Comment**
-在 PR 上添加评论:
+**Method 1: Issue Comment**
 
 ```
-/claude 重构这个函数的命名使其更清晰
+@claude Fix this bug: Show error message when user login fails
 ```
 
-## 本地部署
+**Method 2: PR Review**
+Add task description in PR Review
 
-### 环境要求
+**Method 3: PR Review Comment**
+Add a comment on the PR:
+
+```
+/claude Refactor this function's naming to be clearer
+```
+
+## Local Deployment
+
+### Requirements
 
 - Go 1.26+
 - Git
-- Claude Code CLI (`claude` 命令)
+- Claude Code CLI (`claude` command)
 - GitHub Token
 - Anthropic API Key
 
-### 编译
+### Build
 
 ```bash
 make build
 ```
 
-或手动编译:
+Or build manually:
 
 ```bash
 go build -o gh-claude main.go
 ```
 
-### 运行
+### Run
 
 ```bash
 export GH_TOKEN=your_github_token
@@ -80,7 +82,7 @@ export ANTHROPIC_API_KEY=your_anthropic_api_key
 ./gh-claude [-port=3456] [-work-dir=/tmp/claude-runner] [-max-concurrent=5]
 ```
 
-### 使用 Docker 运行
+### Run with Docker
 
 ```bash
 docker run -d \
@@ -92,9 +94,9 @@ docker run -d \
   gh-claude
 ```
 
-### 使用 Systemd 服务 (Linux)
+### Run as Systemd Service (Linux)
 
-创建 `/etc/systemd/system/gh-claude.service`:
+Create `/etc/systemd/system/gh-claude.service`:
 
 ```ini
 [Unit]
@@ -114,7 +116,7 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-启用服务:
+Enable the service:
 
 ```bash
 sudo systemctl daemon-reload
@@ -122,87 +124,87 @@ sudo systemctl enable gh-claude
 sudo systemctl start gh-claude
 ```
 
-## API 接口
+## API Endpoints
 
-| 接口       | 方法 | 说明                  |
-| ---------- | ---- | --------------------- |
-| `/run`     | POST | 提交新任务            |
-| `/status`  | GET  | 查询任务状态          |
-| `/queue`   | GET  | 查看任务队列          |
-| `/cancel`  | POST | 取消任务              |
-| `/webhook` | POST | GitHub Webhook 接收器 |
-| `/health`  | GET  | 健康检查              |
+| Endpoint   | Method | Description                  |
+| ---------- | ------ | ---------------------------- |
+| `/run`     | POST   | Submit a new task            |
+| `/status`  | GET    | Get task status              |
+| `/queue`   | GET    | List task queue              |
+| `/cancel`  | POST   | Cancel a task                |
+| `/webhook` | POST   | GitHub Webhook receiver      |
+| `/health`  | GET    | Health check                 |
 
-### 提交任务示例
+### Submit Task Example
 
 ```bash
 curl -X POST http://localhost:3456/run \
   -H "Content-Type: application/json" \
   -d '{
     "repo": "owner/repo",
-    "task": "添加用户登录功能",
+    "task": "Add user login feature",
     "branch": "feature/login"
   }'
 ```
 
-## 工作流程
+## Workflow
 
-1. **接收 Webhook**: 服务监听 GitHub 事件
-2. **解析任务**: 提取任务描述和目标仓库/分支
-3. **创建 Worktree**: 在 `/tmp/claude-runner/{owner-repo}/{branch}` 创建 worktree
-4. **执行任务**: 运行 `claude` 命令执行任务
-5. **提交推送**: 自动提交修改并推送到远程
-6. **反馈结果**: 在 PR 上添加执行结果评论
+1. **Receive Webhook**: Service listens for GitHub events
+2. **Parse Task**: Extract task description and target repo/branch
+3. **Create Worktree**: Create worktree at `/tmp/claude-runner/{owner-repo}/{branch}`
+4. **Execute Task**: Run `claude` command to execute the task
+5. **Commit & Push**: Automatically commit changes and push to remote
+6. **Feedback**: Add execution result comment on PR
 
-## Agent 集成
+## Agent Integration
 
-gh-claude 支持 AI Agent（如 OpenCLAW）通过 GitHub 自动驱动代码修改。
+gh-claude supports AI Agents (like OpenCLAW) to automatically drive code modifications via GitHub.
 
-### Claude Code 安装 Skill
+### Install Skill for Claude Code
 
-将 skill 文件复制到 Claude Code 配置目录：
+Copy the skill file to Claude Code config directory:
 
 ```bash
 mkdir -p ~/.claude/skills
 cp skills/gh-claude.md ~/.claude/skills/
 ```
 
-### OpenCLAW 安装 Skill
+### Install Skill for OpenCLAW
 
-OpenCLAW 会自动从项目根目录的 `skills/` 目录加载 skill 文件。
+OpenCLAW automatically loads skill files from the project's `skills/` directory.
 
-由于此文档已在 `skills/gh-claude.md`，OpenCLAW 可以直接使用此 skill。
+Since this documentation is already in `skills/gh-claude.md`, OpenCLAW can directly use this skill.
 
-如需将此 skill 包含在 OpenCLAW 的工作流程中，请在项目根目录确保 `skills/gh-claude.md` 文件存在。
+To include this skill in OpenCLAW's workflow, ensure `skills/gh-claude.md` exists in the project root.
 
-### 功能说明
+### Features
 
-- **Issue 触发**: 在 Issue 评论中使用 `@claude` 或 `/claude` 开头
-- **PR 触发**: 在 PR review 或 review comment 中使用 `@claude` 或 `/claude`
-- **自动执行**: gh-claude 自动创建分支、执行任务、提交代码
-- **结果反馈**: 执行结果通过评论发布在原始 Issue/PR 上
+- **Issue Trigger**: Use `@claude` or `/claude` at the start of Issue comments
+- **PR Trigger**: Use `@claude` or `/claude` in PR review or review comments
+- **Auto Execute**: gh-claude automatically creates branches, executes tasks, and commits code
+- **Result Feedback**: Execution results are posted as comments on the original Issue/PR
 
-### 使用示例
+### Usage Example
 
 ```bash
-# 1. 创建 Issue
+# 1. Create Issue
 gh issue create --title "Fix login bug" --body "User login fails silently"
 
-# 2. 触发任务
+# 2. Trigger Task
 gh issue comment 1 --body "@claude Fix the silent login failure"
 
-# 3. 获取结果
+# 3. Get Result
 gh issue view 1 --comments
 ```
 
-详细使用说明请参考 [skills/gh-claude.md](skills/gh-claude.md)。
+For detailed usage, see [skills/gh-claude.md](skills/gh-claude.md).
 
-## 配置说明
+## Configuration
 
-| 参数              | 默认值             | 说明                 |
-| ----------------- | ------------------ | -------------------- |
-| `-port`           | 3456               | HTTP 服务端口        |
-| `-work-dir`       | /tmp/claude-runner | Worktree 存储目录    |
-| `-max-concurrent` | 5                  | 最大并发任务数       |
-| `-github-token`   | 环境变量 GH_TOKEN  | GitHub 访问令牌      |
-| `-webhook-url`    | 空                 | 任务完成后的回调 URL |
+| Parameter         | Default Value        | Description                     |
+| ----------------- | -------------------- | ------------------------------- |
+| `-port`           | 3456                | HTTP server port                |
+| `-work-dir`       | /tmp/claude-runner  | Worktree storage directory      |
+| `-max-concurrent` | 5                   | Maximum concurrent tasks       |
+| `-github-token`   | env GH_TOKEN        | GitHub access token             |
+| `-webhook-url`    | empty               | Callback URL after task completion |
