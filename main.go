@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"flag"
@@ -28,6 +29,8 @@ import (
 	"sync"
 	"time"
 )
+
+const MaxOutputBuffer = 100 * 1024 // Maximum 100KB output buffer
 
 var (
 	port          = flag.Int("port", 3456, "HTTP server port")
@@ -167,21 +170,26 @@ type Response struct {
 }
 
 type Task struct {
-	ID         string    `json:"id"`
-	Repo       string    `json:"repo"` // owner/repo
-	Branch     string    `json:"branch"`
-	Task       string    `json:"task"`
-	PR         int       `json:"pr"` // PR number (for GitHub interaction)
-	Debug      bool      `json:"debug"`
-	Status     string    `json:"status"` // queued, running, completed, failed
-	CreatedAt  time.Time `json:"created_at"`
-	StartedAt  time.Time `json:"started_at,omitempty"`
-	EndedAt    time.Time `json:"ended_at,omitempty"`
-	Result     string    `json:"result,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	WorkTree   string    `json:"worktree,omitempty"`
-	ReactionID int       `json:"reaction_id,omitempty"` // For tracking reaction to remove
-	CommentID  int       `json:"comment_id,omitempty"`  // For tracking comment
+	ID         string          `json:"id"`
+	Repo       string          `json:"repo"` // owner/repo
+	Branch     string          `json:"branch"`
+	Task       string          `json:"task"`
+	PR         int             `json:"pr"` // PR number (for GitHub interaction)
+	Debug      bool            `json:"debug"`
+	Status     string          `json:"status"` // queued, running, completed, failed
+	CreatedAt  time.Time       `json:"created_at"`
+	StartedAt  time.Time       `json:"started_at,omitempty"`
+	EndedAt    time.Time       `json:"ended_at,omitempty"`
+	Result     string          `json:"result,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	WorkTree   string          `json:"worktree,omitempty"`
+	ReactionID int             `json:"reaction_id,omitempty"` // For tracking reaction to remove
+	CommentID  int             `json:"comment_id,omitempty"`  // For tracking comment
+	// Real-time output fields (not persisted to database)
+	Output     strings.Builder     `json:"-"`                  // Real-time output buffer
+	OutputMu   sync.Mutex          `json:"-"`                  // Mutex for output buffer
+	SSEClients map[chan string]bool `json:"-"`                // SSE client channels
+	DoneCh     chan struct{}        `json:"-"`                // Task completion signal
 }
 
 // Branch-level lock: one task per branch at a time
@@ -205,6 +213,55 @@ type Service struct {
 	activeCount   int
 	db            *sql.DB
 	githubUserID  string // GitHub user ID of the bot
+}
+
+// appendOutput thread-safely appends output, discarding oldest content when exceeding max buffer
+func (t *Task) appendOutput(output string) {
+	t.OutputMu.Lock()
+	defer t.OutputMu.Unlock()
+
+	// Check if we need to truncate
+	newLen := t.Output.Len() + len(output)
+	if newLen > MaxOutputBuffer {
+		excess := newLen - MaxOutputBuffer
+		if excess > 0 {
+			current := t.Output.String()
+			t.Output.Reset()
+			if excess < len(current) {
+				t.Output.WriteString(current[excess:])
+			}
+		}
+	}
+	t.Output.WriteString(output)
+}
+
+// broadcastOutput sends output to all SSE clients
+func (t *Task) broadcastOutput(output string) {
+	t.OutputMu.Lock()
+	defer t.OutputMu.Unlock()
+
+	for clientCh := range t.SSEClients {
+		select {
+		case clientCh <- output:
+		default:
+			// Skip if channel is full
+		}
+	}
+}
+
+// broadcastDone sends completion signal to all SSE clients
+func (t *Task) broadcastDone() {
+	t.OutputMu.Lock()
+	defer t.OutputMu.Unlock()
+
+	for clientCh := range t.SSEClients {
+		select {
+		case clientCh <- "__DONE__":
+		default:
+			// Skip if channel is full
+		}
+	}
+	close(t.DoneCh)
 }
 
 // Initialize Claude settings.json with custom env vars
@@ -355,6 +412,7 @@ func main() {
 	http.HandleFunc("/cancel", svc.handleCancel)
 	http.HandleFunc("/webhook", svc.handleWebhook)
 	http.HandleFunc("/health", svc.handleHealth)
+	http.HandleFunc("/output/", svc.handleSSEOutput)
 	http.HandleFunc("/", svc.handleRoot)
 
 	addr := fmt.Sprintf(":%d", *port)
@@ -384,6 +442,7 @@ func (s *Service) handleRoot(w http.ResponseWriter, r *http.Request) {
 			"/queue - List all tasks",
 			"/cancel?task_id=xxx - Cancel a task",
 			"/health - Health check",
+			"/output/{task_id} - SSE real-time output stream",
 		},
 	})
 }
@@ -699,7 +758,89 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		claudeCmd.Env = append(claudeCmd.Env, "CLAUDE_MODEL="+model)
 	}
 
-	output, err := claudeCmd.CombinedOutput()
+	// Initialize SSE components
+	task.SSEClients = make(map[chan string]bool)
+	task.DoneCh = make(chan struct{})
+
+	// Create pipes for real-time output capture
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+
+	// Buffer to collect final output (for GitHub comment)
+	var finalOutput bytes.Buffer
+
+	// Use MultiWriter to simultaneously write to pipe (for SSE) and buffer (for final output)
+	claudeCmd.Stdout = io.MultiWriter(stdoutWriter, &finalOutput)
+	claudeCmd.Stderr = io.MultiWriter(stderrWriter, &finalOutput)
+
+	// Start the command
+	if err := claudeCmd.Start(); err != nil {
+		log.Printf("[EXEC] ERROR: failed to start claude: %v", err)
+		task.Status = "failed"
+		task.Error = "failed to start claude: " + err.Error()
+		task.EndedAt = time.Now()
+		s.notifyGitHub(task, false)
+		s.completeTask(task, bl, lockKey)
+		return
+	}
+
+	// Goroutine to read and broadcast output in real-time
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Read stdout
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 4096)
+			for {
+				n, err := stdoutReader.Read(buf)
+				if n > 0 {
+					output := string(buf[:n])
+					task.appendOutput(output)
+					task.broadcastOutput(output)
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+
+		// Read stderr
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 4096)
+			for {
+				n, err := stderrReader.Read(buf)
+				if n > 0 {
+					output := string(buf[:n])
+					task.appendOutput(output)
+					task.broadcastOutput(output)
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+
+		// Wait for command to complete
+		claudeCmd.Wait()
+
+		// Close pipe writers
+		stdoutWriter.Close()
+		stderrWriter.Close()
+
+		wg.Wait()
+
+		// Broadcast done signal
+		task.broadcastDone()
+	}()
+
+	// Wait for command completion (this blocks until the command finishes)
+	err := claudeCmd.Wait()
+
+	// Get the final output from the buffer
+	output := finalOutput.String()
 
 	if len(output) > 0 {
 		log.Printf("[EXEC] Claude output: %s", truncate(string(output), 500))
@@ -1291,6 +1432,67 @@ func (s *Service) handleCancel(w http.ResponseWriter, r *http.Request) {
 		TaskID:  taskID,
 		Status:  "cancelled",
 	})
+}
+
+// handleSSEOutput provides Server-Sent Events for real-time task output
+func (s *Service) handleSSEOutput(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimPrefix(r.URL.Path, "/output/")
+
+	s.mu.Lock()
+	task, exists := s.tasks[taskID]
+	s.mu.Unlock()
+
+	if !exists || task.DoneCh == nil {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Create client output channel
+	clientCh := make(chan string, 100)
+	task.OutputMu.Lock()
+	task.SSEClients[clientCh] = true
+	task.OutputMu.Unlock()
+
+	defer func() {
+		task.OutputMu.Lock()
+		delete(task.SSEClients, clientCh)
+		task.OutputMu.Unlock()
+		close(clientCh)
+	}()
+
+	// Send existing output first
+	task.OutputMu.Lock()
+	existingOutput := task.Output.String()
+	task.OutputMu.Unlock()
+
+	if existingOutput != "" {
+		fmt.Fprintf(w, "data: %s\n\n", existingOutput)
+		w.(http.Flusher).Flush()
+	}
+
+	// Continuously send new output
+	for {
+		select {
+		case output := <-clientCh:
+			if output == "__DONE__" {
+				// Send done event
+				task.OutputMu.Lock()
+				finalOutput := task.Output.String()
+				task.OutputMu.Unlock()
+				fmt.Fprintf(w, "event: done\ndata: %s\n\n", finalOutput)
+				w.(http.Flusher).Flush()
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", output)
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
