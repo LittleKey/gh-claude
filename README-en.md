@@ -1,5 +1,7 @@
 # gh-claude
 
+🌐 [中文 README](./README.md)
+
 Claude Code Runner Service - A tool for automatically executing Claude Code tasks via GitHub Webhooks.
 
 ## Features
