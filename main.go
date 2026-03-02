@@ -743,33 +743,38 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 			log.Printf("[WARN] Failed to fetch origin: %v", err)
 		}
 
-		// Update local main branch to match remote
-		log.Printf("[GIT] Updating local main branch to match remote")
-		cmd = exec.Command("git", "checkout", "origin/main", "-B", "main")
+		// Fetch origin/HEAD to get the default branch name
+		cmd = exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+		cmd.Dir = mainRepoPath
+		output, err := cmd.Output()
+		defaultBranch := "main" // fallback
+		if err == nil {
+			// Parse output like "refs/remotes/origin/main"
+			ref := strings.TrimSpace(string(output))
+			if strings.HasPrefix(ref, "refs/remotes/origin/") {
+				defaultBranch = strings.TrimPrefix(ref, "refs/remotes/origin/")
+				log.Printf("[GIT] Detected default branch: %s", defaultBranch)
+			}
+		} else {
+			log.Printf("[WARN] Failed to detect default branch, using: %s", defaultBranch)
+		}
+
+		// Update local default branch to match remote
+		log.Printf("[GIT] Updating local %s branch to match remote", defaultBranch)
+		cmd = exec.Command("git", "fetch", "origin", fmt.Sprintf("refs/heads/%s:%s", defaultBranch, defaultBranch))
 		cmd.Dir = mainRepoPath
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			log.Printf("[WARN] Failed to update main branch: %v", err)
-		}
-	}
-
-	// Determine base branch
-	baseBranch := "main"
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = mainRepoPath
-	if output, err := cmd.Output(); err == nil {
-		trimmed := strings.TrimSpace(string(output))
-		if trimmed != "" {
-			baseBranch = trimmed
+			log.Printf("[WARN] Failed to update %s branch: %v", defaultBranch, err)
 		}
 	}
 
 	// For PR, fetch the PR branch
 	if task.PR > 0 {
-		cmd = exec.Command("git", "fetch", "origin", fmt.Sprintf("pull/%d/head:pr-%d", task.PR, task.PR))
-		cmd.Dir = mainRepoPath
-		cmd.Run() // Ignore error, branch might not exist
+		prCmd := exec.Command("git", "fetch", "origin", fmt.Sprintf("pull/%d/head:pr-%d", task.PR, task.PR))
+		prCmd.Dir = mainRepoPath
+		prCmd.Run() // Ignore error, branch might not exist
 	}
 
 	// Create worktree
@@ -782,22 +787,30 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 
 	if branchExists {
 		// Branch exists, use regular worktree add
-		cmd = exec.Command("git", "worktree", "add", "-f", worktreePath, task.Branch)
-		cmd.Dir = mainRepoPath
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		wtCmd := exec.Command("git", "worktree", "add", "-f", worktreePath, task.Branch)
+		wtCmd.Dir = mainRepoPath
+		wtCmd.Stdout = os.Stdout
+		wtCmd.Stderr = os.Stderr
+		if err := wtCmd.Run(); err != nil {
 			return fmt.Errorf("failed to create worktree: %v", err)
 		}
 	} else {
-		// Branch doesn't exist, create from base branch
-		log.Printf("[GIT] Branch %s does not exist, creating from %s", task.Branch, baseBranch)
-		cmd = exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, baseBranch)
-		cmd.Dir = mainRepoPath
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to create worktree: %v", err)
+		// Branch doesn't exist, create from remote's default branch (origin/HEAD)
+		log.Printf("[GIT] Branch %s does not exist, creating from origin/HEAD", task.Branch)
+		wtCmd := exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, "origin/HEAD")
+		wtCmd.Dir = mainRepoPath
+		wtCmd.Stdout = os.Stdout
+		wtCmd.Stderr = os.Stderr
+		if err := wtCmd.Run(); err != nil {
+			// Fallback: try with local main branch
+			log.Printf("[WARN] Failed to create worktree with origin/HEAD, trying local main")
+			wtCmd = exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, "main")
+			wtCmd.Dir = mainRepoPath
+			wtCmd.Stdout = os.Stdout
+			wtCmd.Stderr = os.Stderr
+			if err := wtCmd.Run(); err != nil {
+				return fmt.Errorf("failed to create worktree: %v", err)
+			}
 		}
 	}
 
