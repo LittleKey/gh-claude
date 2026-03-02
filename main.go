@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1546,6 +1547,17 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Expand @filepath references if worktree exists
+	repoSafe := strings.ReplaceAll(repo, "/", "-")
+	worktreePath := filepath.Join(s.workDir, repoSafe, branch)
+	if _, err := os.Stat(worktreePath); err == nil {
+		// Worktree exists, expand @references
+		taskDesc = expandAtReferences(taskDesc, worktreePath)
+		log.Printf("[WEBHOOK] Expanded @references in worktree %s", worktreePath)
+	} else {
+		log.Printf("[WEBHOOK] Worktree does not exist yet: %s (will be created when task runs)", worktreePath)
+	}
+
 	// For PR comments, if branch is not found, fail the task
 	if prNum > 0 && branch == "" {
 		log.Printf("[WEBHOOK] PR branch not found for PR #%d, skipping task", prNum)
@@ -1595,6 +1607,59 @@ func extractTask(body string) string {
 	}
 
 	return strings.Join(cleaned, "\n")
+}
+
+// expandAtReferences expands @filename references in task description
+// by replacing them with the file contents from the worktree
+func expandAtReferences(taskDesc, worktreePath string) string {
+	// Regex to match @filepath patterns (but not @@ which might be used for escaping)
+	re := regexp.MustCompile(`@([^\s@]+)`)
+
+	// Resolve worktree path to absolute
+	absWorktreePath, err := filepath.Abs(worktreePath)
+	if err != nil {
+		log.Printf("[EXPAND] Failed to get absolute path of worktree: %v", err)
+		return taskDesc
+	}
+
+	return re.ReplaceAllStringFunc(taskDesc, func(match string) string {
+		relPath := strings.TrimPrefix(match, "@")
+
+		// Block absolute paths or paths with null bytes
+		if filepath.IsAbs(relPath) || strings.Contains(relPath, "\x00") {
+			log.Printf("[EXPAND] Rejected absolute path or invalid path: %s", relPath)
+			return match
+		}
+
+		// Clean the path to resolve any ".." components
+		fullPath := filepath.Clean(filepath.Join(worktreePath, relPath))
+
+		// Get absolute path and verify it stays within worktree
+		absFullPath, err := filepath.Abs(fullPath)
+		if err != nil {
+			log.Printf("[EXPAND] Failed to get absolute path: %v", err)
+			return match
+		}
+
+		// Check if the resolved path is within worktree (must have worktree as prefix)
+		if !strings.HasPrefix(absFullPath, absWorktreePath+string(filepath.Separator)) &&
+			absFullPath != absWorktreePath {
+			log.Printf("[EXPAND] Rejected path traversal attempt: %s -> %s", relPath, absFullPath)
+			return match
+		}
+
+		// Read file content
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			// If file not found, keep the original @reference
+			log.Printf("[EXPAND] File not found: %s (error: %v)", fullPath, err)
+			return match
+		}
+
+		// Return file content with reference note
+		return fmt.Sprintf("\n--- File: %s ---\n%s\n--- End of %s ---\n",
+			relPath, string(content), relPath)
+	})
 }
 
 func truncate(s string, maxLen int) string {
