@@ -727,6 +727,16 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to clone: %v", err)
 		}
+	} else {
+		// Sync with remote to get latest changes
+		log.Printf("[GIT] Fetching latest changes for %s", task.Repo)
+		cmd := exec.Command("git", "fetch", "origin")
+		cmd.Dir = mainRepoPath
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Printf("[WARN] Failed to fetch origin: %v", err)
+		}
 	}
 
 	// Determine base branch
@@ -775,35 +785,49 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 		c.Run()
 	}
 
+	// Set remote URL with credentials for push operations
+	remoteURL := fmt.Sprintf("https://%s@github.com/%s.git", s.github.token, task.Repo)
+	remoteCmd := exec.Command("git", "remote", "set-url", "origin", remoteURL)
+	remoteCmd.Dir = worktreePath
+	if err := remoteCmd.Run(); err != nil {
+		log.Printf("[WARN] Failed to set remote URL with credentials: %v", err)
+	}
+
 	return nil
 }
 
 // createPRIfNeeded creates a PR if it doesn't exist for issue-based branches
-func (s *Service) createPRIfNeeded(task *Task) {
+// Returns the PR number if a PR was created or already exists, 0 otherwise
+func (s *Service) createPRIfNeeded(task *Task) int {
 	// Extract issue number from branch name (e.g., fix-issue-2 -> 2)
 	issueNum := 0
 	if _, err := fmt.Sscanf(task.Branch, "fix-issue-%d", &issueNum); err != nil {
 		log.Printf("[PR] Failed to extract issue number from branch %s: %v", task.Branch, err)
-		return
+		return 0
 	}
 
 	// Check if PR already exists
 	parts := strings.Split(task.Repo, "/")
 	if len(parts) != 2 {
 		log.Printf("[PR] Invalid repo format: %s", task.Repo)
-		return
+		return 0
 	}
-	owner, repo := parts[0], parts[1]
 
-	// Use gh CLI to check if PR exists and create if not
-	prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, issueNum)
-	checkCmd := exec.Command("gh", "pr", "view", strconv.Itoa(issueNum), "--json", "url", "-R", task.Repo)
-	_, err := checkCmd.CombinedOutput()
+	// Use gh CLI to check if PR exists
+	checkCmd := exec.Command("gh", "pr", "view", strconv.Itoa(issueNum), "--json", "url,number", "-R", task.Repo)
+	checkOutput, err := checkCmd.CombinedOutput()
 
 	if err == nil {
-		// PR already exists
-		log.Printf("[PR] PR #%d already exists: %s", issueNum, prURL)
-		return
+		// PR already exists, extract PR number from gh output
+		log.Printf("[PR] PR for issue #%d already exists", issueNum)
+		// Try to get PR number from the output
+		var prData struct {
+			Number int `json:"number"`
+		}
+		if json.Unmarshal(checkOutput, &prData) == nil && prData.Number > 0 {
+			return prData.Number
+		}
+		return issueNum
 	}
 
 	// PR doesn't exist, create it
@@ -823,10 +847,27 @@ func (s *Service) createPRIfNeeded(task *Task) {
 	createOutput, err := createCmd.CombinedOutput()
 	if err != nil {
 		log.Printf("[PR] Failed to create PR: %v, output: %s", err, string(createOutput))
-		return
+		return 0
 	}
 
 	log.Printf("[PR] Successfully created PR for branch %s", task.Branch)
+
+	// Get the newly created PR number using gh
+	viewCmd := exec.Command("gh", "pr", "view", "--json", "number", "-R", task.Repo, task.Branch)
+	viewOutput, err := viewCmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[PR] Failed to get PR number: %v, output: %s", err, string(viewOutput))
+		return issueNum // Return issue number as fallback
+	}
+
+	var prData struct {
+		Number int `json:"number"`
+	}
+	if json.Unmarshal(viewOutput, &prData) == nil && prData.Number > 0 {
+		return prData.Number
+	}
+
+	return issueNum
 }
 
 // getPRBranch gets the actual branch name for a PR using GitHub API
@@ -898,8 +939,11 @@ func (s *Service) pushChanges(task *Task) {
 		log.Printf("[PUSH] Successfully pushed branch %s for task %s", task.Branch, task.ID)
 
 		// Create PR if it doesn't exist (for issue-based branches)
-		if strings.HasPrefix(task.Branch, "fix-issue-") {
-			s.createPRIfNeeded(task)
+		if strings.HasPrefix(task.Branch, "fix-issue-") && task.PR == 0 {
+			prNum := s.createPRIfNeeded(task)
+			if prNum > 0 {
+				task.PR = prNum
+			}
 		}
 	}
 }
@@ -1187,10 +1231,11 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 					var issueTitle, issueBody string
 					if issue, ok := payload["issue"].(map[string]interface{}); ok {
 						if n, ok := issue["number"].(float64); ok {
-							prNum = int(n)
 							// Check if this is a PR comment or issue comment
 							if pr, ok := issue["pull_request"].(map[string]interface{}); ok && pr != nil {
-								// For PR comments, get the actual branch from GitHub API
+								// For PR comments, prNum is the PR number
+								prNum = int(n)
+								// Get the actual branch from GitHub API
 								if r, ok := payload["repository"].(map[string]interface{}); ok {
 									if fullName, ok := r["full_name"].(string); ok {
 										branch = s.getPRBranch(fullName, prNum)
@@ -1198,7 +1243,10 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 								}
 								// Note: If branch is empty, we fail later in the check
 							} else {
-								branch = fmt.Sprintf("fix-issue-%d", prNum)
+								// For issue comments, prNum should be 0 (not an actual PR)
+								// Branch is derived from issue number
+								prNum = 0
+								branch = fmt.Sprintf("fix-issue-%d", int(n))
 							}
 						}
 						// Extract title and body for context
