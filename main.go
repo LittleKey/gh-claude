@@ -784,9 +784,9 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 			}
 		}
 
-		// Update local default branch to match remote
-		log.Printf("[GIT] Updating local %s branch to match remote", defaultBranch)
-		cmd = exec.Command("git", "fetch", "origin", fmt.Sprintf("refs/heads/%s:%s", defaultBranch, defaultBranch))
+		// Update local default branch to match remote (use --force for non-fast-forward)
+		log.Printf("[GIT] Updating local %s branch to match remote (force)", defaultBranch)
+		cmd = exec.Command("git", "fetch", "--force", "origin", fmt.Sprintf("refs/heads/%s:%s", defaultBranch, defaultBranch))
 		cmd.Dir = mainRepoPath
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
