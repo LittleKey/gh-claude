@@ -737,6 +737,16 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 		if err := cmd.Run(); err != nil {
 			log.Printf("[WARN] Failed to fetch origin: %v", err)
 		}
+
+		// Update local main branch to match remote
+		log.Printf("[GIT] Updating local main branch to match remote")
+		cmd = exec.Command("git", "checkout", "origin/main", "-B", "main")
+		cmd.Dir = mainRepoPath
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Printf("[WARN] Failed to update main branch: %v", err)
+		}
 	}
 
 	// Determine base branch
@@ -759,13 +769,24 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 
 	// Create worktree
 	log.Printf("[GIT] Creating worktree at %s for branch %s", worktreePath, task.Branch)
-	cmd = exec.Command("git", "worktree", "add", "-f", worktreePath, task.Branch)
-	cmd.Dir = mainRepoPath
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err != nil {
-		// If worktree add fails, try with -B (reset branch)
+	// Check if branch exists locally
+	checkCmd := exec.Command("git", "rev-parse", "--verify", fmt.Sprintf("refs/heads/%s", task.Branch))
+	checkCmd.Dir = mainRepoPath
+	branchExists := checkCmd.Run() == nil
+
+	if branchExists {
+		// Branch exists, use regular worktree add
+		cmd = exec.Command("git", "worktree", "add", "-f", worktreePath, task.Branch)
+		cmd.Dir = mainRepoPath
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to create worktree: %v", err)
+		}
+	} else {
+		// Branch doesn't exist, create from base branch
+		log.Printf("[GIT] Branch %s does not exist, creating from %s", task.Branch, baseBranch)
 		cmd = exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, baseBranch)
 		cmd.Dir = mainRepoPath
 		cmd.Stdout = os.Stdout
