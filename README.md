@@ -154,6 +154,49 @@ curl -X POST http://localhost:3456/run \
 5. **提交推送**: 自动提交修改并推送到远程
 6. **反馈结果**: 在 PR 上添加执行结果评论
 
+## Agent 集成
+
+gh-claude 支持 AI Agent（如 OpenCLAW）通过 GitHub 自动驱动代码修改。
+
+### Claude Code 安装 Skill
+
+将 skill 文件复制到 Claude Code 配置目录：
+
+```bash
+mkdir -p ~/.claude/skills
+cp skills/gh-claude.md ~/.claude/skills/
+```
+
+### OpenCLAW 安装 Skill
+
+OpenCLAW 会自动从项目根目录的 `skills/` 目录加载 skill 文件。
+
+由于此文档已在 `skills/gh-claude.md`，OpenCLAW 可以直接使用此 skill。
+
+如需将此 skill 包含在 OpenCLAW 的工作流程中，请在项目根目录确保 `skills/gh-claude.md` 文件存在。
+
+### 功能说明
+
+- **Issue 触发**: 在 Issue 评论中使用 `@claude` 或 `/claude` 开头
+- **PR 触发**: 在 PR review 或 review comment 中使用 `@claude` 或 `/claude`
+- **自动执行**: gh-claude 自动创建分支、执行任务、提交代码
+- **结果反馈**: 执行结果通过评论发布在原始 Issue/PR 上
+
+### 使用示例
+
+```bash
+# 1. 创建 Issue
+gh issue create --title "Fix login bug" --body "User login fails silently"
+
+# 2. 触发任务
+gh issue comment 1 --body "@claude Fix the silent login failure"
+
+# 3. 获取结果
+gh issue view 1 --comments
+```
+
+详细使用说明请参考 [skills/gh-claude.md](skills/gh-claude.md)。
+
 ## 配置说明
 
 | 参数              | 默认值             | 说明                 |
