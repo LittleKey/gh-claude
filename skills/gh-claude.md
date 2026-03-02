@@ -2,6 +2,15 @@
 
 This skill enables AI agents (like OpenCLAW) to interact with gh-claude for automated code modifications through GitHub.
 
+## When to Use
+
+Use gh-claude when:
+- A user wants to modify code in a GitHub repository
+- A user wants to add new features to a repository
+- A user wants to fix bugs in a GitHub repo
+- A user wants to refactor code in a repository
+- A user wants to add or update tests in a GitHub repo
+
 ## Overview
 
 gh-claude is a GitHub bot that executes Claude Code tasks on repositories. It responds to triggers in Issues and Pull Requests, performs code modifications, and reports results back.
