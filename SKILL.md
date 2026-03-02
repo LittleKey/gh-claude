@@ -7,11 +7,11 @@ gh-claude is a GitHub bot that executes Claude Code tasks on GitHub repositories
 ## When to Use
 
 Use gh-claude when:
-- A user wants to modify code in a GitHub repository
-- A user wants to add new features to a repository
-- A user wants to fix bugs in a GitHub repo
-- A user wants to refactor code in a repository
-- A user wants to add or update tests in a GitHub repo
+- Modifying code in a GitHub repository
+- Adding new features to a GitHub repository
+- Fixing bugs in a GitHub repository
+- Refactoring code in a GitHub repository
+- Adding or updating tests in a GitHub repository
 
 ## Trigger Method
 
