@@ -261,7 +261,10 @@ func (t *Task) broadcastDone() {
 			// Skip if channel is full
 		}
 	}
-	close(t.DoneCh)
+	if t.DoneCh != nil {
+		close(t.DoneCh)
+		t.DoneCh = nil
+	}
 }
 
 // Initialize Claude settings.json with custom env vars
@@ -515,6 +518,12 @@ func (s *Service) handleRun(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now(),
 	}
 
+	// Initialize SSE components early so clients can subscribe even before task starts
+	task.OutputMu.Lock()
+	task.SSEClients = make(map[chan string]bool)
+	task.DoneCh = make(chan struct{})
+	task.OutputMu.Unlock()
+
 	// Add reaction to PR if this is a PR task
 	if req.PR > 0 && s.github != nil {
 		parts := strings.Split(req.Repo, "/")
@@ -645,6 +654,16 @@ func (s *Service) processQueue() {
 func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	log.Printf("[EXEC] Starting task %s for repo=%s branch=%s", task.ID, task.Repo, task.Branch)
 
+	// Initialize SSE components if not already done (task was created via handleRun or restored from DB)
+	task.OutputMu.Lock()
+	if task.SSEClients == nil {
+		task.SSEClients = make(map[chan string]bool)
+	}
+	if task.DoneCh == nil {
+		task.DoneCh = make(chan struct{})
+	}
+	task.OutputMu.Unlock()
+
 	task.Status = "running"
 	task.StartedAt = time.Now()
 
@@ -758,9 +777,8 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		claudeCmd.Env = append(claudeCmd.Env, "CLAUDE_MODEL="+model)
 	}
 
-	// Initialize SSE components
-	task.SSEClients = make(map[chan string]bool)
-	task.DoneCh = make(chan struct{})
+	// Error variable for command execution
+	var err error
 
 	// Create pipes for real-time output capture
 	stdoutReader, stdoutWriter := io.Pipe()
@@ -785,6 +803,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	}
 
 	// Goroutine to read and broadcast output in real-time
+	errCh := make(chan error, 1)
 	go func() {
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -824,7 +843,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		}()
 
 		// Wait for command to complete
-		claudeCmd.Wait()
+		err := claudeCmd.Wait()
 
 		// Close pipe writers
 		stdoutWriter.Close()
@@ -834,10 +853,12 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 
 		// Broadcast done signal
 		task.broadcastDone()
+
+		errCh <- err
 	}()
 
 	// Wait for command completion (this blocks until the command finishes)
-	err := claudeCmd.Wait()
+	err = <-errCh
 
 	// Get the final output from the buffer
 	output := finalOutput.String()
@@ -1442,10 +1463,23 @@ func (s *Service) handleSSEOutput(w http.ResponseWriter, r *http.Request) {
 	task, exists := s.tasks[taskID]
 	s.mu.Unlock()
 
-	if !exists || task.DoneCh == nil {
+	if !exists {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
+
+	// Check if task is already completed
+	taskIsCompleted := task.Status == "completed" || task.Status == "failed"
+
+	// Initialize SSE components if not already done (task might be queued)
+	task.OutputMu.Lock()
+	if task.SSEClients == nil {
+		task.SSEClients = make(map[chan string]bool)
+	}
+	if task.DoneCh == nil {
+		task.DoneCh = make(chan struct{})
+	}
+	task.OutputMu.Unlock()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1472,6 +1506,13 @@ func (s *Service) handleSSEOutput(w http.ResponseWriter, r *http.Request) {
 	if existingOutput != "" {
 		fmt.Fprintf(w, "data: %s\n\n", existingOutput)
 		w.(http.Flusher).Flush()
+	}
+
+	// If task is already completed, send done event immediately
+	if taskIsCompleted {
+		fmt.Fprintf(w, "event: done\ndata: %s\n\n", task.Result)
+		w.(http.Flusher).Flush()
+		return
 	}
 
 	// Continuously send new output
