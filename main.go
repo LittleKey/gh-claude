@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -296,6 +297,8 @@ func NewService(db *sql.DB, dataDir string) *Service {
 	githubUserID, err := gh.GetCurrentUserID()
 	if err != nil {
 		log.Printf("[WARN] Failed to get GitHub user ID: %v", err)
+	} else {
+		log.Printf("[INFO] GitHub bot user ID: %s", githubUserID)
 	}
 	return &Service{
 		tasks:         make(map[string]*Task),
@@ -1135,17 +1138,44 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	switch eventType {
 	case "issue_comment":
+		// Debug: log full payload keys
+		log.Printf("[WEBHOOK] Full payload keys: %v", reflect.ValueOf(payload).MapKeys())
+
 		// Check action - only process new comments
 		if action, ok := payload["action"].(string); ok && action != "created" {
+			log.Printf("[WEBHOOK] Ignoring comment with action: %s", action)
 			return
 		}
 		// Check sender - ignore comments from the bot itself
+		log.Printf("[WEBHOOK] Bot user ID: %s", s.githubUserID)
+
+		// Check sender at top level
 		if sender, ok := payload["sender"].(map[string]interface{}); ok {
+			log.Printf("[WEBHOOK] Sender found in payload: %+v", sender)
 			if senderID, ok := sender["id"].(float64); ok {
-				botID := s.githubUserID
-				if botID != "" && strconv.FormatInt(int64(senderID), 10) == botID {
-					log.Printf("[WEBHOOK] Ignoring comment from bot user")
+				senderIDStr := strconv.FormatInt(int64(senderID), 10)
+				log.Printf("[WEBHOOK] Sender ID: %s, Bot ID: %s", senderIDStr, s.githubUserID)
+				if s.githubUserID != "" && senderIDStr == s.githubUserID {
+					log.Printf("[WEBHOOK] Ignoring comment from bot user (senderID=%s, botID=%s)", senderIDStr, s.githubUserID)
 					return
+				}
+			}
+		} else {
+			log.Printf("[WEBHOOK] No sender found in payload")
+		}
+
+		// Also check comment.author as fallback
+		if comment, ok := payload["comment"].(map[string]interface{}); ok {
+			log.Printf("[WEBHOOK] Comment keys: %v", reflect.ValueOf(comment).MapKeys())
+			if author, ok := comment["user"].(map[string]interface{}); ok {
+				log.Printf("[WEBHOOK] Comment user: %+v", author)
+				if authorID, ok := author["id"].(float64); ok {
+					authorIDStr := strconv.FormatInt(int64(authorID), 10)
+					log.Printf("[WEBHOOK] Comment author ID: %s, Bot ID: %s", authorIDStr, s.githubUserID)
+					if s.githubUserID != "" && authorIDStr == s.githubUserID {
+						log.Printf("[WEBHOOK] Ignoring comment from bot user (via comment.user)")
+						return
+					}
 				}
 			}
 		}
@@ -1209,13 +1239,15 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "pull_request_review":
 		// Check action - only process new reviews
 		if action, ok := payload["action"].(string); ok && action != "submitted" {
+			log.Printf("[WEBHOOK] Ignoring review with action: %s", action)
 			return
 		}
 		// Check sender - ignore reviews from the bot itself
+		log.Printf("[WEBHOOK] Bot user ID: %s", s.githubUserID)
 		if sender, ok := payload["sender"].(map[string]interface{}); ok {
 			if senderID, ok := sender["id"].(float64); ok {
-				botID := s.githubUserID
-				if botID != "" && strconv.FormatInt(int64(senderID), 10) == botID {
+				senderIDStr := strconv.FormatInt(int64(senderID), 10)
+				if s.githubUserID != "" && senderIDStr == s.githubUserID {
 					log.Printf("[WEBHOOK] Ignoring review from bot user")
 					return
 				}
@@ -1265,13 +1297,15 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "pull_request_review_comment":
 		// Check action - only process new comments
 		if action, ok := payload["action"].(string); ok && action != "created" {
+			log.Printf("[WEBHOOK] Ignoring review comment with action: %s", action)
 			return
 		}
 		// Check sender - ignore comments from the bot itself
+		log.Printf("[WEBHOOK] Bot user ID: %s", s.githubUserID)
 		if sender, ok := payload["sender"].(map[string]interface{}); ok {
 			if senderID, ok := sender["id"].(float64); ok {
-				botID := s.githubUserID
-				if botID != "" && strconv.FormatInt(int64(senderID), 10) == botID {
+				senderIDStr := strconv.FormatInt(int64(senderID), 10)
+				if s.githubUserID != "" && senderIDStr == s.githubUserID {
 					log.Printf("[WEBHOOK] Ignoring review comment from bot user")
 					return
 				}
