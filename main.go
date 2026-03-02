@@ -38,117 +38,6 @@ var (
 	webhookURL    = flag.String("webhook-url", "", "URL to send status updates to")
 )
 
-// GitHub API helper
-type GitHub struct {
-	token string
-}
-
-func NewGitHub(token string) *GitHub {
-	return &GitHub{token: token}
-}
-
-func (g *GitHub) do(method, url string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-		req.Body = nil
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return respBody, fmt.Errorf("GitHub API error: %d - %s", resp.StatusCode, string(respBody))
-	}
-	return respBody, nil
-}
-
-// Add reaction to PR
-func (g *GitHub) AddPRReaction(owner, repo string, prNumber int, reaction string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reactions", owner, repo, prNumber)
-	payload := fmt.Sprintf(`{"content":"%s"}`, reaction)
-	_, err := g.do("POST", url, []byte(payload))
-	return err
-}
-
-// Remove reaction from PR
-func (g *GitHub) RemovePRReaction(owner, repo string, prNumber int, reactionID int) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reactions/%d", owner, repo, prNumber, reactionID)
-	_, err := g.do("DELETE", url, nil)
-	return err
-}
-
-// Get current user ID from GitHub API
-func (g *GitHub) GetCurrentUserID() (string, error) {
-	url := "https://api.github.com/user"
-	resp, err := g.do("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	var user map[string]interface{}
-	if err := json.Unmarshal(resp, &user); err != nil {
-		return "", err
-	}
-	if id, ok := user["id"].(float64); ok {
-		return strconv.FormatInt(int64(id), 10), nil
-	}
-	return "", nil
-}
-
-// Add comment to PR using gh CLI
-func (g *GitHub) AddPRComment(owner, repo string, prNumber int, body string, branch string) error {
-	repoFullName := owner + "/" + repo
-	// Always comment on PR, ignore branch name
-	cmd := exec.Command("gh", "pr", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
-
-	cmd.Dir = "/"
-	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to add comment: %v, output: %s", err, string(output))
-	}
-	return nil
-}
-
-// Add comment to Issue using gh CLI
-func (g *GitHub) AddIssueComment(owner, repo string, issueNumber int, body string) error {
-	repoFullName := owner + "/" + repo
-	cmd := exec.Command("gh", "issue", "comment", strconv.Itoa(issueNumber), "--body", body, "-R", repoFullName)
-
-	cmd.Dir = "/"
-	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to add issue comment: %v, output: %s", err, string(output))
-	}
-	return nil
-}
-
-// Get PR info
-func (g *GitHub) GetPR(owner, repo string, prNumber int) (map[string]interface{}, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, prNumber)
-	resp, err := g.do("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	var pr map[string]interface{}
-	if err := json.Unmarshal(resp, &pr); err != nil {
-		return nil, err
-	}
-	return pr, nil
-}
-
 type Request struct {
 	Repo   string `json:"repo"`             // owner/repo
 	Task   string `json:"task"`             // Task for Claude Code
@@ -201,97 +90,15 @@ type Service struct {
 	workDir       string
 	dataDir       string
 	maxConcurrent int
-	github        *GitHub
+	github        *GithubService
+	repo          *RepoService
+	code          *CodeService
 	webhookURL    string
 	activeCount   int
 	db            *sql.DB
 	githubUserID  string // GitHub user ID of the bot
 }
 
-// Initialize Claude settings.json with custom env vars
-func initClaudeSettings() {
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		homeDir = "/home/appuser"
-	}
-
-	settingsDir := filepath.Join(homeDir, ".claude")
-	settingsPath := filepath.Join(settingsDir, "settings.json")
-
-	// Create directory if not exists
-	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
-		log.Printf("[WARN] Failed to create settings directory: %v", err)
-		return
-	}
-
-	// Read existing or create new settings
-	settings := map[string]interface{}{
-		"env":                               map[string]string{},
-		"skipDangerousModePermissionPrompt": true,
-	}
-
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			log.Printf("[WARN] Failed to parse existing settings: %v", err)
-		}
-	}
-
-	// Update env vars
-	env := map[string]string{}
-	if existingEnv, ok := settings["env"].(map[string]interface{}); ok {
-		for k, v := range existingEnv {
-			if strVal, ok := v.(string); ok {
-				env[k] = strVal
-			}
-		}
-	}
-
-	// Set custom env vars from environment
-	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
-		env["ANTHROPIC_AUTH_TOKEN"] = apiKey
-	}
-	if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
-		env["ANTHROPIC_BASE_URL"] = baseURL
-	}
-	if model := os.Getenv("CLAUDE_MODEL"); model != "" {
-		env["ANTHROPIC_MODEL"] = model
-		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
-		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
-		env["ANTHROPIC_SMALL_FAST_MODEL"] = model
-	}
-	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-
-	settings["env"] = env
-
-	// Write back
-	newData, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		log.Printf("[WARN] Failed to marshal settings: %v", err)
-		return
-	}
-
-	if err := os.WriteFile(settingsPath, newData, 0o644); err != nil {
-		log.Printf("[WARN] Failed to write settings: %v", err)
-		return
-	}
-
-	log.Printf("[INIT] Claude settings initialized at %s", settingsPath)
-
-	// Configure git safe.directory to allow all directories
-	cmd := exec.Command("git", "config", "--global", "--add", "safe.directory", "*")
-	cmd.Run()
-
-	// Configure git SSL (use system certs)
-	cmd = exec.Command("git", "config", "--global", "http.sslCAInfo", "/etc/ssl/certs/ca-certificates.crt")
-	cmd.Run()
-
-	// Ensure work directory exists
-	workDir := "/tmp/claude-runner"
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		log.Printf("[WARN] Failed to create work directory: %v", err)
-	}
-}
 
 // ==================== Database Module ====================
 
@@ -475,7 +282,7 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 // ==================== Service ====================
 
 func NewService(db *sql.DB, dataDir string) *Service {
-	gh := NewGitHub(*githubToken)
+	gh := NewGithubService(*githubToken)
 	// Get bot user ID from GitHub API
 	githubUserID, err := gh.GetCurrentUserID()
 	if err != nil {
@@ -483,6 +290,10 @@ func NewService(db *sql.DB, dataDir string) *Service {
 	} else {
 		log.Printf("[INFO] GitHub bot user ID: %s", githubUserID)
 	}
+
+	repo := NewRepoService(*workDir, gh)
+	code := NewCodeService()
+
 	return &Service{
 		tasks:         make(map[string]*Task),
 		branchLocks:   make(map[string]*BranchLock),
@@ -491,6 +302,8 @@ func NewService(db *sql.DB, dataDir string) *Service {
 		dataDir:       dataDir,
 		maxConcurrent: *maxConcurrent,
 		github:        gh,
+		repo:          repo,
+		code:          code,
 		webhookURL:    *webhookURL,
 		db:            db,
 		githubUserID:  githubUserID,
@@ -527,8 +340,18 @@ func main() {
 		}
 	}
 
-	// Initialize Claude settings.json
-	initClaudeSettings()
+	// Initialize Claude settings
+	if err := svc.code.InitSettings(); err != nil {
+		log.Printf("[WARN] Failed to initialize Claude settings: %v", err)
+	}
+
+	// Configure git safe.directory to allow all directories
+	cmd := exec.Command("git", "config", "--global", "--add", "safe.directory", "*")
+	cmd.Run()
+
+	// Configure git SSL (use system certs)
+	cmd = exec.Command("git", "config", "--global", "http.sslCAInfo", "/etc/ssl/certs/ca-certificates.crt")
+	cmd.Run()
 
 	// HTTP handlers
 	http.HandleFunc("/run", svc.handleRun)
@@ -778,116 +601,34 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		}
 	}
 
-	// Create worktree path: /tmp/claude-runner/{owner-repo}/{branch}
-	repoSafe := strings.ReplaceAll(task.Repo, "/", "-")
-	worktreePath := filepath.Join(s.workDir, repoSafe, task.Branch)
-	task.WorkTree = worktreePath
-
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
-		log.Printf("[EXEC] ERROR: failed to create worktree dir: %v", err)
+	// Setup worktree using RepoService
+	worktreePath, err := s.repo.SetupWorktree(task.Repo, task.Branch, task.PR)
+	if err != nil {
+		log.Printf("[EXEC] ERROR: failed to setup worktree: %v", err)
 		task.Status = "failed"
-		task.Error = "failed to create worktree dir: " + err.Error()
+		task.Error = "failed to setup worktree: " + err.Error()
 		task.EndedAt = time.Now()
 		s.completeTask(task, bl, lockKey)
 		return
 	}
+	task.WorkTree = worktreePath
 
-	// Check if worktree already exists
-	worktreeExists := false
-	if _, err := os.Stat(worktreePath); err == nil {
-		worktreeExists = true
-	}
-
-	// Use main repo directory as reference
-	mainRepoPath := filepath.Join(s.workDir, repoSafe, ".main")
-
-	if !worktreeExists {
-		// Need to create worktree
-		if err := s.setupWorktree(task, mainRepoPath, worktreePath); err != nil {
-			log.Printf("[EXEC] ERROR: failed to setup worktree: %v", err)
-			task.Status = "failed"
-			task.Error = "failed to setup worktree: " + err.Error()
-			task.EndedAt = time.Now()
-			s.completeTask(task, bl, lockKey)
-			return
-		}
-	}
-
-	// Run Claude Code
-	log.Printf("[EXEC] Running Claude Code: %s", truncate(task.Task, 100))
-
-	// Update Claude settings.json with custom env vars
-	settingsPath := filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		var settings map[string]interface{}
-		if err := json.Unmarshal(data, &settings); err == nil {
-			env := map[string]string{}
-			if existingEnv, ok := settings["env"].(map[string]interface{}); ok {
-				for k, v := range existingEnv {
-					if strVal, ok := v.(string); ok {
-						env[k] = strVal
-					}
-				}
-			}
-			// Set custom env vars
-			if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
-				env["ANTHROPIC_AUTH_TOKEN"] = apiKey
-			}
-			if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
-				env["ANTHROPIC_BASE_URL"] = baseURL
-			}
-			if model := os.Getenv("CLAUDE_MODEL"); model != "" {
-				env["ANTHROPIC_MODEL"] = model
-				env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
-				env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-				env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
-				env["ANTHROPIC_SMALL_FAST_MODEL"] = model
-			}
-			env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-			settings["env"] = env
-			if newData, err := json.MarshalIndent(settings, "", "  "); err == nil {
-				os.WriteFile(settingsPath, newData, 0o644)
-			}
-		}
-	}
-
-	// Run Claude with proper environment
-	claudeCmd := exec.Command("claude", "--dangerously-skip-permissions", task.Task)
-	claudeCmd.Dir = worktreePath
-	claudeCmd.Env = append(os.Environ(),
-		"CLAUDE_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),
-		"ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),
-	)
-	// Add custom API base URL if set
-	if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
-		claudeCmd.Env = append(claudeCmd.Env, "CLAUDE_API_BASE_URL="+baseURL)
-	}
-	// Add custom model if set
-	if model := os.Getenv("CLAUDE_MODEL"); model != "" {
-		claudeCmd.Env = append(claudeCmd.Env, "CLAUDE_MODEL="+model)
-	}
-
-	output, err := claudeCmd.CombinedOutput()
-
-	if len(output) > 0 {
-		log.Printf("[EXEC] Claude output: %s", truncate(string(output), 500))
-		task.Result = string(output)
-	}
-
+	// Run Claude Code using CodeService
+	result, err := s.code.Run(worktreePath, task.Task)
+	task.Result = result
 	task.EndedAt = time.Now()
 
 	if err != nil {
 		log.Printf("[EXEC] Claude command error: %v", err)
 		task.Status = "failed"
-		task.Error = fmt.Sprintf("claude error: %v\n%s", err, string(output))
+		task.Error = fmt.Sprintf("claude error: %v\n%s", err, result)
 		// Notify GitHub of failure
 		if task.PR > 0 {
 			s.notifyGitHub(task, false)
 		}
 	} else {
 		task.Status = "completed"
-		// Push changes
+		// Push changes using RepoService
 		s.pushChanges(task)
 		// Notify GitHub of success
 		if task.PR > 0 {
@@ -898,139 +639,18 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	s.completeTask(task, bl, lockKey)
 }
 
-func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) error {
-	cloneURL := fmt.Sprintf("https://%s@github.com/%s.git", s.github.token, task.Repo)
-
-	// Clone main repo if not exists
-	if _, err := os.Stat(mainRepoPath); os.IsNotExist(err) {
-		log.Printf("[GIT] Cloning %s to %s", task.Repo, mainRepoPath)
-		cmd := exec.Command("git", "clone", "--bare", cloneURL, mainRepoPath)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to clone: %v", err)
-		}
-	}
-
-	// Determine base branch
-	baseBranch := "main"
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = mainRepoPath
-	if output, err := cmd.Output(); err == nil {
-		trimmed := strings.TrimSpace(string(output))
-		if trimmed != "" {
-			baseBranch = trimmed
-		}
-	}
-
-	// For PR, fetch the PR branch
-	if task.PR > 0 {
-		cmd = exec.Command("git", "fetch", "origin", fmt.Sprintf("pull/%d/head:pr-%d", task.PR, task.PR))
-		cmd.Dir = mainRepoPath
-		cmd.Run() // Ignore error, branch might not exist
-	}
-
-	// Create worktree
-	log.Printf("[GIT] Creating worktree at %s for branch %s", worktreePath, task.Branch)
-	cmd = exec.Command("git", "worktree", "add", "-f", worktreePath, task.Branch)
-	cmd.Dir = mainRepoPath
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		// If worktree add fails, try with -B (reset branch)
-		cmd = exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, baseBranch)
-		cmd.Dir = mainRepoPath
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to create worktree: %v", err)
-		}
-	}
-
-	// Configure git user in worktree
-	cmds := []*exec.Cmd{
-		exec.Command("git", "config", "user.email", "claude-runner@local"),
-		exec.Command("git", "config", "user.name", "Claude Runner"),
-	}
-	for _, c := range cmds {
-		c.Dir = worktreePath
-		c.Run()
-	}
-
-	return nil
-}
-
 // createPRIfNeeded creates a PR if it doesn't exist for issue-based branches
 func (s *Service) createPRIfNeeded(task *Task) {
-	// Extract issue number from branch name (e.g., fix-issue-2 -> 2)
-	issueNum := 0
-	if _, err := fmt.Sscanf(task.Branch, "fix-issue-%d", &issueNum); err != nil {
-		log.Printf("[PR] Failed to extract issue number from branch %s: %v", task.Branch, err)
-		return
-	}
-
-	// Check if PR already exists
-	parts := strings.Split(task.Repo, "/")
-	if len(parts) != 2 {
-		log.Printf("[PR] Invalid repo format: %s", task.Repo)
-		return
-	}
-	owner, repo := parts[0], parts[1]
-
-	// Use gh CLI to check if PR exists and create if not
-	prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, issueNum)
-	checkCmd := exec.Command("gh", "pr", "view", strconv.Itoa(issueNum), "--json", "url", "-R", task.Repo)
-	_, err := checkCmd.CombinedOutput()
-
-	if err == nil {
-		// PR already exists
-		log.Printf("[PR] PR #%d already exists: %s", issueNum, prURL)
-		return
-	}
-
-	// PR doesn't exist, create it
-	log.Printf("[PR] Creating PR for issue #%d from branch %s", issueNum, task.Branch)
-
-	// Get issue title for PR title
-	title := fmt.Sprintf("Fix issue #%d", issueNum)
-	body := fmt.Sprintf("This PR fixes issue #%d\n\nTask: %s", issueNum, truncate(task.Task, 200))
-
-	createCmd := exec.Command("gh", "pr", "create",
-		"--title", title,
-		"--body", body,
-		"--base", "main",
-		"--head", task.Branch,
-		"-R", task.Repo,
-	)
-	createOutput, err := createCmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[PR] Failed to create PR: %v, output: %s", err, string(createOutput))
-		return
-	}
-
-	log.Printf("[PR] Successfully created PR for branch %s", task.Branch)
+	s.repo.CreatePRIfNeeded(task)
 }
 
 // getPRBranch gets the actual branch name for a PR using GitHub API
 func (s *Service) getPRBranch(repo string, prNum int) string {
-	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(prNum), "--json", "headRefName", "-R", repo)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[WEBHOOK] Failed to get PR #%d branch: %v, output: %s", prNum, err, string(output))
-		return ""
+	branch := s.github.GetPRBranch(repo, prNum)
+	if branch != "" {
+		log.Printf("[WEBHOOK] Got PR #%d branch: %s", prNum, branch)
 	}
-
-	var result struct {
-		HeadRefName string `json:"headRefName"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		log.Printf("[WEBHOOK] Failed to parse PR branch: %v", err)
-		return ""
-	}
-
-	log.Printf("[WEBHOOK] Got PR #%d branch: %s", prNum, result.HeadRefName)
-	return result.HeadRefName
+	return branch
 }
 
 func (s *Service) pushChanges(task *Task) {
@@ -1038,48 +658,21 @@ func (s *Service) pushChanges(task *Task) {
 		return
 	}
 
-	// Check if there are changes
-	cmd := exec.Command("git", "status", "--porcelain")
-	cmd.Dir = task.WorkTree
-	output, err := cmd.Output()
-
-	if err != nil || len(output) == 0 {
+	// Check if there are changes using RepoService
+	hasChanges, err := s.repo.HasChanges(task.WorkTree)
+	if err != nil || !hasChanges {
 		log.Printf("[PUSH] No changes to push for task %s", task.ID)
 		return
 	}
 
 	log.Printf("[PUSH] Changes detected, committing and pushing for task %s", task.ID)
 
-	// Stage all changes
-	addCmd := exec.Command("git", "add", "-A")
-	addCmd.Dir = task.WorkTree
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		task.Error += fmt.Sprintf("\nGit add failed: %v\n%s", err, string(output))
-		task.Status = "failed"
-		return
-	}
-
-	// Create commit
+	// Commit and push using RepoService
 	commitMsg := fmt.Sprintf("Claude: %s", truncate(task.Task, 50))
-	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
-	commitCmd.Dir = task.WorkTree
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		// No changes to commit (maybe just formatting or already committed)
-		log.Printf("[PUSH] No commit needed or commit failed: %s", string(output))
-	}
-
-	// Push
-	pushCmd := exec.Command("git", "push", "origin", task.Branch)
-	pushCmd.Dir = task.WorkTree
-	pushCmd.Env = append(os.Environ(), "GIT_ASKPASS=true")
-
-	pushOutput, err := pushCmd.CombinedOutput()
-	if err != nil {
-		task.Error += fmt.Sprintf("\nPush failed: %v\n%s", err, string(pushOutput))
+	if err := s.repo.CommitAndPush(task.WorkTree, task.Branch, commitMsg); err != nil {
+		task.Error += fmt.Sprintf("\nPush failed: %v", err)
 		task.Status = "failed"
 	} else {
-		log.Printf("[PUSH] Successfully pushed branch %s for task %s", task.Branch, task.ID)
-
 		// Create PR if it doesn't exist (for issue-based branches)
 		if strings.HasPrefix(task.Branch, "fix-issue-") {
 			s.createPRIfNeeded(task)
@@ -1126,7 +719,7 @@ func (s *Service) notifyGitHub(task *Task, success bool) {
 	// - If branch starts with "fix-issue-" and PR == 0, comment on Issue
 	if task.PR > 0 {
 		// Comment on PR
-		if err := s.github.AddPRComment(owner, repo, task.PR, comment, task.Branch); err != nil {
+		if err := s.github.AddPRComment(owner, repo, task.PR, comment); err != nil {
 			log.Printf("[GITHUB] Failed to add comment to PR #%d: %v", task.PR, err)
 		} else {
 			log.Printf("[GITHUB] Added completion comment to PR #%d", task.PR)
