@@ -606,6 +606,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		task.Status = "failed"
 		task.Error = "failed to create worktree dir: " + err.Error()
 		task.EndedAt = time.Now()
+		s.notifyGitHub(task, false)
 		s.completeTask(task, bl, lockKey)
 		return
 	}
@@ -626,6 +627,7 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 			task.Status = "failed"
 			task.Error = "failed to setup worktree: " + err.Error()
 			task.EndedAt = time.Now()
+			s.notifyGitHub(task, false)
 			s.completeTask(task, bl, lockKey)
 			return
 		}
@@ -633,7 +635,13 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 
 	// Sync worktree with remote and resolve any conflicts
 	if err := s.syncWorktree(task, worktreePath); err != nil {
-		log.Printf("[WARN] Failed to sync worktree: %v", err)
+		log.Printf("[EXEC] ERROR: failed to sync worktree: %v", err)
+		task.Status = "failed"
+		task.Error = "failed to sync worktree: " + err.Error()
+		task.EndedAt = time.Now()
+		s.notifyGitHub(task, false)
+		s.completeTask(task, bl, lockKey)
+		return
 	}
 
 	// Run Claude Code
@@ -703,19 +711,18 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 		log.Printf("[EXEC] Claude command error: %v", err)
 		task.Status = "failed"
 		task.Error = fmt.Sprintf("claude error: %v\n%s", err, string(output))
-		// Notify GitHub of failure
-		if task.PR > 0 {
-			s.notifyGitHub(task, false)
-		}
 	} else {
 		task.Status = "completed"
 		// Push changes
 		s.pushChanges(task)
-		// Notify GitHub of success
-		if task.PR > 0 {
-			s.notifyGitHub(task, true)
+		// Check if push failed
+		if task.Status == "failed" {
+			// pushChanges already set task.Status = "failed" on error
 		}
 	}
+
+	// Always notify GitHub (PR or Issue)
+	s.notifyGitHub(task, task.Status == "completed")
 
 	s.completeTask(task, bl, lockKey)
 }
@@ -735,7 +742,8 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 	} else {
 		// Sync with remote to get latest changes
 		log.Printf("[GIT] Fetching latest changes for %s", task.Repo)
-		cmd := exec.Command("git", "fetch", "origin")
+		// Fetch both the default branch and origin/HEAD
+		cmd := exec.Command("git", "fetch", "origin", "--depth=1")
 		cmd.Dir = mainRepoPath
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -743,7 +751,14 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 			log.Printf("[WARN] Failed to fetch origin: %v", err)
 		}
 
-		// Fetch origin/HEAD to get the default branch name
+		// Also fetch origin/HEAD explicitly
+		cmd = exec.Command("git", "fetch", "origin", "refs/heads/*:refs/remotes/origin/*", "--depth=1")
+		cmd.Dir = mainRepoPath
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run() // Ignore error, we have fallback
+
+		// Try to get default branch from origin/HEAD
 		cmd = exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
 		cmd.Dir = mainRepoPath
 		output, err := cmd.Output()
@@ -756,7 +771,17 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 				log.Printf("[GIT] Detected default branch: %s", defaultBranch)
 			}
 		} else {
-			log.Printf("[WARN] Failed to detect default branch, using: %s", defaultBranch)
+			// Fallback: try common default branch names
+			log.Printf("[WARN] Failed to detect default branch from origin/HEAD, trying common names")
+			for _, name := range []string{"main", "master"} {
+				checkCmd := exec.Command("git", "rev-parse", fmt.Sprintf("refs/remotes/origin/%s", name))
+				checkCmd.Dir = mainRepoPath
+				if checkCmd.Run() == nil {
+					defaultBranch = name
+					log.Printf("[GIT] Found default branch: %s", defaultBranch)
+					break
+				}
+			}
 		}
 
 		// Update local default branch to match remote
@@ -795,21 +820,30 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 			return fmt.Errorf("failed to create worktree: %v", err)
 		}
 	} else {
-		// Branch doesn't exist, create from remote's default branch (origin/HEAD)
-		log.Printf("[GIT] Branch %s does not exist, creating from origin/HEAD", task.Branch)
-		wtCmd := exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, "origin/HEAD")
+		// Branch doesn't exist, create from remote's default branch
+		// Try origin/main first, then origin/master, then local main
+		log.Printf("[GIT] Branch %s does not exist, creating from remote default branch", task.Branch)
+		wtCmd := exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, "origin/main")
 		wtCmd.Dir = mainRepoPath
 		wtCmd.Stdout = os.Stdout
 		wtCmd.Stderr = os.Stderr
 		if err := wtCmd.Run(); err != nil {
-			// Fallback: try with local main branch
-			log.Printf("[WARN] Failed to create worktree with origin/HEAD, trying local main")
-			wtCmd = exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, "main")
+			// Try origin/master
+			log.Printf("[WARN] Failed to create from origin/main, trying origin/master")
+			wtCmd = exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, "origin/master")
 			wtCmd.Dir = mainRepoPath
 			wtCmd.Stdout = os.Stdout
 			wtCmd.Stderr = os.Stderr
 			if err := wtCmd.Run(); err != nil {
-				return fmt.Errorf("failed to create worktree: %v", err)
+				// Try local main
+				log.Printf("[WARN] Failed to create from origin/master, trying local main")
+				wtCmd = exec.Command("git", "worktree", "add", "-f", "-B", task.Branch, worktreePath, "main")
+				wtCmd.Dir = mainRepoPath
+				wtCmd.Stdout = os.Stdout
+				wtCmd.Stderr = os.Stderr
+				if err := wtCmd.Run(); err != nil {
+					return fmt.Errorf("failed to create worktree: %v", err)
+				}
 			}
 		}
 	}
