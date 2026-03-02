@@ -94,6 +94,36 @@ To get results:
 2. Use GitHub API to poll for new comments
 3. Check for messages starting with "✅ **Task Completed**" or "❌ **Task Failed**"
 
+### Finding Results from Issues
+
+When a task is triggered from an Issue, the result location depends on whether a PR was created:
+
+**If PR was created** (recommended):
+1. Find the related PR by searching for "Fix issue #{N}" in PR titles
+2. Check the PR comments for results
+3. Example using GitHub CLI:
+   ```bash
+   # Find PR that fixes issue #1
+   gh pr list --search "fix issue #1" --state all
+
+   # Or search by branch name
+   gh pr list --head fix-issue-1 --state all
+
+   # Get PR comments to find results
+   gh pr view 1 --comments
+   ```
+
+**If no PR was created**:
+1. Check the original Issue comments for results
+   ```bash
+   # Get issue comments to find results
+   gh issue view 1 --comments
+   ```
+
+**Determining if a PR exists**:
+- Task's `PR` field > 0: Result is on the PR
+- Task's `PR` field = 0: Result is on the Issue
+
 ## Usage Example for Agents
 
 ### Step 1: Create an Issue
