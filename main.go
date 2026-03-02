@@ -84,19 +84,28 @@ func (g *GitHub) RemovePRReaction(owner, repo string, prNumber int, reactionID i
 	return err
 }
 
-// Add comment to PR or Issue using gh CLI
+// Get current user ID from GitHub API
+func (g *GitHub) GetCurrentUserID() (string, error) {
+	url := "https://api.github.com/user"
+	resp, err := g.do("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	var user map[string]interface{}
+	if err := json.Unmarshal(resp, &user); err != nil {
+		return "", err
+	}
+	if id, ok := user["id"].(float64); ok {
+		return strconv.FormatInt(int64(id), 10), nil
+	}
+	return "", nil
+}
+
+// Add comment to PR using gh CLI
 func (g *GitHub) AddPRComment(owner, repo string, prNumber int, body string, branch string) error {
 	repoFullName := owner + "/" + repo
-	var cmd *exec.Cmd
-
-	// Determine if this is a PR or issue comment based on branch name
-	if strings.HasPrefix(branch, "pr-") {
-		// PR comment
-		cmd = exec.Command("gh", "pr", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
-	} else {
-		// Issue comment
-		cmd = exec.Command("gh", "issue", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
-	}
+	// Always comment on PR, ignore branch name
+	cmd := exec.Command("gh", "pr", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
 
 	cmd.Dir = "/"
 	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
@@ -104,6 +113,21 @@ func (g *GitHub) AddPRComment(owner, repo string, prNumber int, body string, bra
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to add comment: %v, output: %s", err, string(output))
+	}
+	return nil
+}
+
+// Add comment to Issue using gh CLI
+func (g *GitHub) AddIssueComment(owner, repo string, issueNumber int, body string) error {
+	repoFullName := owner + "/" + repo
+	cmd := exec.Command("gh", "issue", "comment", strconv.Itoa(issueNumber), "--body", body, "-R", repoFullName)
+
+	cmd.Dir = "/"
+	cmd.Env = append(os.Environ(), "GH_TOKEN="+g.token)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to add issue comment: %v, output: %s", err, string(output))
 	}
 	return nil
 }
@@ -178,6 +202,7 @@ type Service struct {
 	webhookURL    string
 	activeCount   int
 	db            *sql.DB
+	githubUserID  string // GitHub user ID of the bot
 }
 
 // Initialize Claude settings.json with custom env vars
@@ -267,6 +292,11 @@ func initClaudeSettings() {
 
 func NewService(db *sql.DB, dataDir string) *Service {
 	gh := NewGitHub(*githubToken)
+	// Get bot user ID from GitHub API
+	githubUserID, err := gh.GetCurrentUserID()
+	if err != nil {
+		log.Printf("[WARN] Failed to get GitHub user ID: %v", err)
+	}
 	return &Service{
 		tasks:         make(map[string]*Task),
 		branchLocks:   make(map[string]*BranchLock),
@@ -277,6 +307,7 @@ func NewService(db *sql.DB, dataDir string) *Service {
 		github:        gh,
 		webhookURL:    *webhookURL,
 		db:            db,
+		githubUserID:  githubUserID,
 	}
 }
 
@@ -872,7 +903,7 @@ func (s *Service) pushChanges(task *Task) {
 
 // notifyGitHub removes reaction and adds a comment to the PR
 func (s *Service) notifyGitHub(task *Task, success bool) {
-	if s.github == nil || task.PR == 0 {
+	if s.github == nil {
 		return
 	}
 
@@ -904,15 +935,29 @@ func (s *Service) notifyGitHub(task *Task, success bool) {
 			task.Branch, truncate(task.Error, 500), truncate(task.Task, 200))
 	}
 
-	// Add comment to PR or Issue
-	target := "PR"
-	if strings.HasPrefix(task.Branch, "fix-issue-") {
-		target = "Issue"
-	}
-	if err := s.github.AddPRComment(owner, repo, task.PR, comment, task.Branch); err != nil {
-		log.Printf("[GITHUB] Failed to add comment to %s #%d: %v", target, task.PR, err)
-	} else {
-		log.Printf("[GITHUB] Added completion comment to %s #%d", target, task.PR)
+	// Determine where to comment: PR or Issue
+	// - If PR > 0, comment on PR
+	// - If branch starts with "fix-issue-" and PR == 0, comment on Issue
+	if task.PR > 0 {
+		// Comment on PR
+		if err := s.github.AddPRComment(owner, repo, task.PR, comment, task.Branch); err != nil {
+			log.Printf("[GITHUB] Failed to add comment to PR #%d: %v", task.PR, err)
+		} else {
+			log.Printf("[GITHUB] Added completion comment to PR #%d", task.PR)
+		}
+	} else if strings.HasPrefix(task.Branch, "fix-issue-") {
+		// Comment on Issue (no PR was created)
+		issueNumStr := strings.TrimPrefix(task.Branch, "fix-issue-")
+		issueNum, err := strconv.Atoi(issueNumStr)
+		if err != nil {
+			log.Printf("[GITHUB] Failed to parse issue number from branch %s: %v", task.Branch, err)
+			return
+		}
+		if err := s.github.AddIssueComment(owner, repo, issueNum, comment); err != nil {
+			log.Printf("[GITHUB] Failed to add comment to Issue #%d: %v", issueNum, err)
+		} else {
+			log.Printf("[GITHUB] Added completion comment to Issue #%d", issueNum)
+		}
 	}
 }
 
@@ -1090,6 +1135,20 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	switch eventType {
 	case "issue_comment":
+		// Check action - only process new comments
+		if action, ok := payload["action"].(string); ok && action != "created" {
+			return
+		}
+		// Check sender - ignore comments from the bot itself
+		if sender, ok := payload["sender"].(map[string]interface{}); ok {
+			if senderID, ok := sender["id"].(float64); ok {
+				botID := s.githubUserID
+				if botID != "" && strconv.FormatInt(int64(senderID), 10) == botID {
+					log.Printf("[WEBHOOK] Ignoring comment from bot user")
+					return
+				}
+			}
+		}
 		if comment, ok := payload["comment"].(map[string]interface{}); ok {
 			if body, ok := comment["body"].(string); ok {
 				// Check for @claude command
@@ -1148,6 +1207,20 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "pull_request_review":
+		// Check action - only process new reviews
+		if action, ok := payload["action"].(string); ok && action != "submitted" {
+			return
+		}
+		// Check sender - ignore reviews from the bot itself
+		if sender, ok := payload["sender"].(map[string]interface{}); ok {
+			if senderID, ok := sender["id"].(float64); ok {
+				botID := s.githubUserID
+				if botID != "" && strconv.FormatInt(int64(senderID), 10) == botID {
+					log.Printf("[WEBHOOK] Ignoring review from bot user")
+					return
+				}
+			}
+		}
 		var prTitle, prBody string
 		if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
 			if n, ok := pr["number"].(float64); ok {
@@ -1190,6 +1263,20 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "pull_request_review_comment":
+		// Check action - only process new comments
+		if action, ok := payload["action"].(string); ok && action != "created" {
+			return
+		}
+		// Check sender - ignore comments from the bot itself
+		if sender, ok := payload["sender"].(map[string]interface{}); ok {
+			if senderID, ok := sender["id"].(float64); ok {
+				botID := s.githubUserID
+				if botID != "" && strconv.FormatInt(int64(senderID), 10) == botID {
+					log.Printf("[WEBHOOK] Ignoring review comment from bot user")
+					return
+				}
+			}
+		}
 		var prTitle, prBody string
 		if comment, ok := payload["comment"].(map[string]interface{}); ok {
 			commentBody := ""
