@@ -11,16 +11,13 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -93,195 +90,15 @@ type Service struct {
 	github        *GithubService
 	repo          *RepoService
 	code          *CodeService
+	taskRepo      *TaskRepo
 	webhookURL    string
 	activeCount   int
-	db            *sql.DB
 	githubUserID  string // GitHub user ID of the bot
-}
-
-
-// ==================== Database Module ====================
-
-// InitDB initializes the database and creates tables
-func InitDB(dataDir string) (*sql.DB, error) {
-	// Ensure data directory exists
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
-
-	dbPath := filepath.Join(dataDir, "tasks.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	// Create tasks table
-	schema := `
-	CREATE TABLE IF NOT EXISTS tasks (
-		id TEXT PRIMARY KEY,
-		repo TEXT NOT NULL,
-		branch TEXT NOT NULL,
-		task_desc TEXT NOT NULL,
-		pr_num INTEGER DEFAULT 0,
-		debug INTEGER DEFAULT 0,
-		status TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		started_at INTEGER,
-		ended_at INTEGER,
-		result TEXT,
-		error TEXT,
-		worktree TEXT,
-		reaction_id INTEGER,
-		comment_id INTEGER
-	);
-	`
-
-	if _, err := db.Exec(schema); err != nil {
-		return nil, fmt.Errorf("failed to create table: %w", err)
-	}
-
-	log.Printf("[DB] Database initialized at %s", dbPath)
-	return db, nil
-}
-
-// SaveTask saves or updates a task in the database
-func SaveTask(db *sql.DB, task *Task) error {
-	log.Printf("[DB] Saving task %s (status: %s) to database", task.ID, task.Status)
-
-	// Convert bool to int for SQLite
-	debugInt := 0
-	if task.Debug {
-		debugInt = 1
-	}
-
-	// Convert time.Time to Unix timestamps
-	var createdAt, startedAt, endedAt int64
-	if !task.CreatedAt.IsZero() {
-		createdAt = task.CreatedAt.Unix()
-	}
-	if !task.StartedAt.IsZero() {
-		startedAt = task.StartedAt.Unix()
-	}
-	if !task.EndedAt.IsZero() {
-		endedAt = task.EndedAt.Unix()
-	}
-
-	query := `
-	INSERT OR REPLACE INTO tasks (
-		id, repo, branch, task_desc, pr_num, debug, status,
-		created_at, started_at, ended_at, result, error, worktree,
-		reaction_id, comment_id
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-
-	_, err := db.Exec(query,
-		task.ID,
-		task.Repo,
-		task.Branch,
-		task.Task,
-		task.PR,
-		debugInt,
-		task.Status,
-		createdAt,
-		startedAt,
-		endedAt,
-		task.Result,
-		task.Error,
-		task.WorkTree,
-		task.ReactionID,
-		task.CommentID,
-	)
-
-	if err != nil {
-		log.Printf("[DB] ERROR: failed to save task %s: %v", task.ID, err)
-		return fmt.Errorf("failed to save task: %w", err)
-	}
-
-	log.Printf("[DB] Task %s saved successfully", task.ID)
-	return nil
-}
-
-// LoadPendingTasks loads all tasks with status "queued" or "running"
-func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
-	log.Printf("[DB] Loading pending tasks from database...")
-
-	query := `
-	SELECT id, repo, branch, task_desc, pr_num, debug, status,
-		   created_at, started_at, ended_at, result, error, worktree,
-		   reaction_id, comment_id
-	FROM tasks
-	WHERE status IN ('queued', 'running')
-	ORDER BY created_at ASC
-	`
-
-	rows, err := db.Query(query)
-	if err != nil {
-		log.Printf("[DB] ERROR: failed to query tasks: %v", err)
-		return nil, fmt.Errorf("failed to query tasks: %w", err)
-	}
-	defer rows.Close()
-
-	var tasks []*Task
-
-	for rows.Next() {
-		var task Task
-		var taskDesc, result, errorStr, worktree string
-		var prNum, debugInt, reactionID, commentID sql.NullInt64
-		var createdAt, startedAt, endedAt int64
-		var status string
-
-		err := rows.Scan(
-			&task.ID,
-			&task.Repo,
-			&task.Branch,
-			&taskDesc,
-			&prNum,
-			&debugInt,
-			&status,
-			&createdAt,
-			&startedAt,
-			&endedAt,
-			&result,
-			&errorStr,
-			&worktree,
-			&reactionID,
-			&commentID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan task: %w", err)
-		}
-
-		task.Task = taskDesc
-		task.Result = result
-		task.Error = errorStr
-		task.WorkTree = worktree
-		task.Status = status
-		task.PR = int(prNum.Int64)
-		task.Debug = debugInt.Int64 == 1
-		task.ReactionID = int(reactionID.Int64)
-		task.CommentID = int(commentID.Int64)
-		task.CreatedAt = time.Unix(createdAt, 0)
-		if startedAt > 0 {
-			task.StartedAt = time.Unix(startedAt, 0)
-		}
-		if endedAt > 0 {
-			task.EndedAt = time.Unix(endedAt, 0)
-		}
-
-		tasks = append(tasks, &task)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating tasks: %w", err)
-	}
-
-	log.Printf("[DB] Loaded %d pending tasks from database", len(tasks))
-	return tasks, nil
 }
 
 // ==================== Service ====================
 
-func NewService(db *sql.DB, dataDir string) *Service {
+func NewService(taskRepo *TaskRepo, dataDir string) *Service {
 	gh := NewGithubService(*githubToken)
 	// Get bot user ID from GitHub API
 	githubUserID, err := gh.GetCurrentUserID()
@@ -304,8 +121,8 @@ func NewService(db *sql.DB, dataDir string) *Service {
 		github:        gh,
 		repo:          repo,
 		code:          code,
+		taskRepo:      taskRepo,
 		webhookURL:    *webhookURL,
-		db:            db,
 		githubUserID:  githubUserID,
 	}
 }
@@ -316,14 +133,14 @@ func main() {
 	// Data directory for SQLite database
 	dataDir := "/tmp/claude-data"
 
-	// Initialize database
-	db, err := InitDB(dataDir)
-	if err != nil {
+	// Initialize task repository
+	taskRepo := NewTaskRepo(nil, dataDir)
+	if err := taskRepo.InitDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer db.Close()
+	defer taskRepo.Close()
 
-	svc := NewService(db, dataDir)
+	svc := NewService(taskRepo, dataDir)
 
 	// Create base work directory
 	if err := os.MkdirAll(svc.workDir, 0o755); err != nil {
@@ -331,7 +148,7 @@ func main() {
 	}
 
 	// Restore pending tasks from database
-	pendingTasks, err := LoadPendingTasks(db)
+	pendingTasks, err := taskRepo.LoadPendingTasks()
 	if err != nil {
 		log.Printf("[WARN] Failed to load pending tasks: %v", err)
 	} else {
@@ -353,16 +170,10 @@ func main() {
 	cmd = exec.Command("git", "config", "--global", "http.sslCAInfo", "/etc/ssl/certs/ca-certificates.crt")
 	cmd.Run()
 
-	// HTTP handlers
-	http.HandleFunc("/run", svc.handleRun)
-	http.HandleFunc("/status", svc.handleStatus)
-	http.HandleFunc("/queue", svc.handleQueue)
-	http.HandleFunc("/cancel", svc.handleCancel)
-	http.HandleFunc("/webhook", svc.handleWebhook)
-	http.HandleFunc("/health", svc.handleHealth)
-	http.HandleFunc("/", svc.handleRoot)
-
+	// Create HTTP server
 	addr := fmt.Sprintf(":%d", *port)
+	httpServer := NewHTTPServer(addr, svc)
+
 	log.Printf("Starting Claude Code Runner on %s", addr)
 	log.Printf("Work directory: %s", svc.workDir)
 	log.Printf("Max concurrent: %d", svc.maxConcurrent)
@@ -370,122 +181,9 @@ func main() {
 	// Start task processor
 	go svc.processQueue()
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := httpServer.Start(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
-}
-
-func (s *Service) handleRoot(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"service":      "claude-code-runner",
-		"version":      "3.0.0",
-		"active_tasks": s.activeCount,
-		"queued_tasks": len(s.taskQueue),
-		"endpoints": []string{
-			"/run - Submit a new task",
-			"/webhook - GitHub webhook receiver",
-			"/status?task_id=xxx - Get task status",
-			"/queue - List all tasks",
-			"/cancel?task_id=xxx - Cancel a task",
-			"/health - Health check",
-		},
-	})
-}
-
-func (s *Service) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	branchCount := 0
-	runningBranches := 0
-	for _, bl := range s.branchLocks {
-		branchCount++
-		bl.mu.Lock()
-		if bl.running != nil {
-			runningBranches++
-		}
-		bl.mu.Unlock()
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":           "healthy",
-		"active_tasks":     s.activeCount,
-		"queued_tasks":     len(s.taskQueue),
-		"total_branches":   branchCount,
-		"running_branches": runningBranches,
-		"timestamp":        time.Now().Unix(),
-	})
-}
-
-func (s *Service) handleRun(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if req.Repo == "" || req.Task == "" {
-		http.Error(w, "repo and task are required", http.StatusBadRequest)
-		return
-	}
-
-	// Determine target branch
-	branch := req.Branch
-	if branch == "" && req.PR > 0 {
-		// Use PR branch
-		branch = fmt.Sprintf("pr-%d", req.PR)
-	} else if branch == "" {
-		// Default to task-specific branch
-		branch = fmt.Sprintf("claude-%d", time.Now().Unix())
-	}
-
-	// Create task
-	task := &Task{
-		ID:        fmt.Sprintf("task-%d-%s", time.Now().UnixNano()%100000, branch),
-		Repo:      req.Repo,
-		Branch:    branch,
-		Task:      req.Task,
-		PR:        req.PR,
-		Debug:     req.Debug,
-		Status:    "queued",
-		CreatedAt: time.Now(),
-	}
-
-	// Add reaction to PR if this is a PR task
-	if req.PR > 0 && s.github != nil {
-		parts := strings.Split(req.Repo, "/")
-		if len(parts) == 2 {
-			// Add "eyes" reaction to show we're working on it
-			if err := s.github.AddPRReaction(parts[0], parts[1], req.PR, "eyes"); err != nil {
-				log.Printf("[WARN] Failed to add reaction to PR #%d: %v", req.PR, err)
-			} else {
-				log.Printf("[GITHUB] Added reaction to PR #%d", req.PR)
-			}
-		}
-	}
-
-	// Submit task
-	s.submitTask(task)
-
-	log.Printf("[RUN] Task %s: repo=%s, branch=%s, task=%s", task.ID, req.Repo, branch, truncate(req.Task, 50))
-
-	json.NewEncoder(w).Encode(Response{
-		Success: true,
-		TaskID:  task.ID,
-		Status:  "queued",
-		Repo:    req.Repo,
-		Branch:  branch,
-	})
 }
 
 func (s *Service) submitTask(task *Task) {
@@ -495,8 +193,8 @@ func (s *Service) submitTask(task *Task) {
 	s.tasks[task.ID] = task
 
 	// Save to database
-	if s.db != nil {
-		if err := SaveTask(s.db, task); err != nil {
+	if s.taskRepo != nil {
+		if err := s.taskRepo.SaveTask(task); err != nil {
 			log.Printf("[WARN] Failed to save task to database: %v", err)
 		}
 	}
@@ -595,8 +293,8 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	task.StartedAt = time.Now()
 
 	// Save task status to database
-	if s.db != nil {
-		if err := SaveTask(s.db, task); err != nil {
+	if s.taskRepo != nil {
+		if err := s.taskRepo.SaveTask(task); err != nil {
 			log.Printf("[WARN] Failed to save task status to database: %v", err)
 		}
 	}
@@ -707,14 +405,14 @@ func (s *Service) notifyGitHub(task *Task, success bool) {
 		// Use Claude's result output as the completion message
 		resultSummary := truncate(task.Result, 1000)
 		if resultSummary != "" {
-			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\n**Result:**\n%s\n\nDuration: %v",
+			comment = fmt.Sprintf("**Task Completed**\n\nBranch `%s` has been updated and pushed.\n\n**Result:**\n%s\n\nDuration: %v",
 				task.Branch, resultSummary, duration)
 		} else {
-			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\nDuration: %v",
+			comment = fmt.Sprintf("**Task Completed**\n\nBranch `%s` has been updated and pushed.\n\nDuration: %v",
 				task.Branch, duration)
 		}
 	} else {
-		comment = fmt.Sprintf("❌ **Task Failed**\n\nBranch `%s`\n\nError: %s\n\nTask: %s",
+		comment = fmt.Sprintf("**Task Failed**\n\nBranch `%s`\n\nError: %s\n\nTask: %s",
 			task.Branch, truncate(task.Error, 500), truncate(task.Task, 200))
 	}
 
@@ -769,8 +467,8 @@ func (s *Service) completeTask(task *Task, bl *BranchLock, lockKey string) {
 	s.mu.Unlock()
 
 	// Save final task status to database
-	if s.db != nil {
-		if err := SaveTask(s.db, task); err != nil {
+	if s.taskRepo != nil {
+		if err := s.taskRepo.SaveTask(task); err != nil {
 			log.Printf("[WARN] Failed to save task completion to database: %v", err)
 		}
 	}
@@ -803,378 +501,6 @@ func (s *Service) sendWebhook(task *Task) {
 	if err == nil {
 		resp.Body.Close()
 	}
-}
-
-func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	taskID := r.URL.Query().Get("task_id")
-	if taskID == "" {
-		http.Error(w, "task_id required", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	task, exists := s.tasks[taskID]
-	s.mu.Unlock()
-
-	if !exists {
-		http.Error(w, "task not found", http.StatusNotFound)
-		return
-	}
-
-	json.NewEncoder(w).Encode(task)
-}
-
-func (s *Service) handleQueue(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	type QueueInfo struct {
-		ActiveTasks int                    `json:"active_tasks"`
-		QueuedTasks int                    `json:"queued_tasks"`
-		TotalTasks  int                    `json:"total_tasks"`
-		Branches    map[string]interface{} `json:"branches"`
-	}
-
-	branchInfo := make(map[string]interface{})
-	for key, bl := range s.branchLocks {
-		bl.mu.Lock()
-		runningTask := bl.running
-		branchInfo[key] = map[string]interface{}{
-			"running": runningTask,
-			"queue":   len(bl.queue),
-		}
-		bl.mu.Unlock()
-	}
-
-	info := QueueInfo{
-		ActiveTasks: s.activeCount,
-		QueuedTasks: len(s.taskQueue),
-		TotalTasks:  len(s.tasks),
-		Branches:    branchInfo,
-	}
-
-	json.NewEncoder(w).Encode(info)
-}
-
-func (s *Service) handleCancel(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	taskID := r.URL.Query().Get("task_id")
-	if taskID == "" {
-		http.Error(w, "task_id required", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	task, exists := s.tasks[taskID]
-	if !exists {
-		s.mu.Unlock()
-		http.Error(w, "task not found", http.StatusNotFound)
-		return
-	}
-
-	if task.Status == "running" {
-		s.mu.Unlock()
-		http.Error(w, "cannot cancel running task", http.StatusBadRequest)
-		return
-	}
-
-	task.Status = "cancelled"
-	delete(s.tasks, taskID)
-	s.mu.Unlock()
-
-	json.NewEncoder(w).Encode(Response{
-		Success: true,
-		TaskID:  taskID,
-		Status:  "cancelled",
-	})
-}
-
-func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Parse GitHub event
-	var payload map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	eventType := r.Header.Get("X-GitHub-Event")
-	log.Printf("[WEBHOOK] Received event: %s", eventType)
-
-	var task *Task
-	var repo, branch, taskDesc string
-	var prNum int
-
-	switch eventType {
-	case "issue_comment":
-		// Debug: log full payload keys
-		log.Printf("[WEBHOOK] Full payload keys: %v", reflect.ValueOf(payload).MapKeys())
-
-		// Check action - only process new comments
-		if action, ok := payload["action"].(string); ok && action != "created" {
-			log.Printf("[WEBHOOK] Ignoring comment with action: %s", action)
-			return
-		}
-		// Check sender - ignore comments from the bot itself
-		log.Printf("[WEBHOOK] Bot user ID: %s", s.githubUserID)
-
-		// Check sender at top level
-		if sender, ok := payload["sender"].(map[string]interface{}); ok {
-			log.Printf("[WEBHOOK] Sender found in payload: %+v", sender)
-			if senderID, ok := sender["id"].(float64); ok {
-				senderIDStr := strconv.FormatInt(int64(senderID), 10)
-				log.Printf("[WEBHOOK] Sender ID: %s, Bot ID: %s", senderIDStr, s.githubUserID)
-				if s.githubUserID != "" && senderIDStr == s.githubUserID {
-					log.Printf("[WEBHOOK] Ignoring comment from bot user (senderID=%s, botID=%s)", senderIDStr, s.githubUserID)
-					return
-				}
-			}
-		} else {
-			log.Printf("[WEBHOOK] No sender found in payload")
-		}
-
-		// Also check comment.author as fallback
-		if comment, ok := payload["comment"].(map[string]interface{}); ok {
-			log.Printf("[WEBHOOK] Comment keys: %v", reflect.ValueOf(comment).MapKeys())
-			if author, ok := comment["user"].(map[string]interface{}); ok {
-				log.Printf("[WEBHOOK] Comment user: %+v", author)
-				if authorID, ok := author["id"].(float64); ok {
-					authorIDStr := strconv.FormatInt(int64(authorID), 10)
-					log.Printf("[WEBHOOK] Comment author ID: %s, Bot ID: %s", authorIDStr, s.githubUserID)
-					if s.githubUserID != "" && authorIDStr == s.githubUserID {
-						log.Printf("[WEBHOOK] Ignoring comment from bot user (via comment.user)")
-						return
-					}
-				}
-			}
-		}
-		if comment, ok := payload["comment"].(map[string]interface{}); ok {
-			if body, ok := comment["body"].(string); ok {
-				// Check for @claude command
-				if strings.Contains(body, "@claude") || strings.HasPrefix(strings.TrimSpace(body), "/claude") {
-					// Get issue/PR context (title and body)
-					var issueTitle, issueBody string
-					if issue, ok := payload["issue"].(map[string]interface{}); ok {
-						if n, ok := issue["number"].(float64); ok {
-							prNum = int(n)
-							// Check if this is a PR comment or issue comment
-							if pr, ok := issue["pull_request"].(map[string]interface{}); ok && pr != nil {
-								// For PR comments, get the actual branch from GitHub API
-								if r, ok := payload["repository"].(map[string]interface{}); ok {
-									if fullName, ok := r["full_name"].(string); ok {
-										branch = s.getPRBranch(fullName, prNum)
-									}
-								}
-								// Note: If branch is empty, we fail later in the check
-							} else {
-								branch = fmt.Sprintf("fix-issue-%d", prNum)
-							}
-						}
-						// Extract title and body for context
-						if title, ok := issue["title"].(string); ok {
-							issueTitle = title
-						}
-						if b, ok := issue["body"].(string); ok {
-							issueBody = b
-						}
-					}
-
-					// Build task description with context
-					taskCmd := extractTask(body)
-					if issueTitle != "" || issueBody != "" {
-						var context strings.Builder
-						if issueTitle != "" {
-							context.WriteString(fmt.Sprintf("Issue/PR Title: %s\n\n", issueTitle))
-						}
-						if issueBody != "" {
-							context.WriteString(fmt.Sprintf("Issue/PR Description:\n%s\n\n", issueBody))
-						}
-						context.WriteString(fmt.Sprintf("User Command:\n%s", taskCmd))
-						taskDesc = context.String()
-					} else {
-						taskDesc = taskCmd
-					}
-
-					// repository is at payload level, not under issue
-					if r, ok := payload["repository"].(map[string]interface{}); ok {
-						if fullName, ok := r["full_name"].(string); ok {
-							repo = fullName
-						}
-					}
-				}
-			}
-		}
-
-	case "pull_request_review":
-		// Check action - only process new reviews
-		if action, ok := payload["action"].(string); ok && action != "submitted" {
-			log.Printf("[WEBHOOK] Ignoring review with action: %s", action)
-			return
-		}
-		// Check sender - ignore reviews from the bot itself
-		log.Printf("[WEBHOOK] Bot user ID: %s", s.githubUserID)
-		if sender, ok := payload["sender"].(map[string]interface{}); ok {
-			if senderID, ok := sender["id"].(float64); ok {
-				senderIDStr := strconv.FormatInt(int64(senderID), 10)
-				if s.githubUserID != "" && senderIDStr == s.githubUserID {
-					log.Printf("[WEBHOOK] Ignoring review from bot user")
-					return
-				}
-			}
-		}
-		var prTitle, prBody string
-		if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
-			if n, ok := pr["number"].(float64); ok {
-				prNum = int(n)
-			}
-			// Get repository full name first
-			var repoFullName string
-			if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
-				if fullName, ok := r["full_name"].(string); ok {
-					repoFullName = fullName
-					repo = fullName
-				}
-			}
-			// Get actual branch name from GitHub API
-			if repoFullName != "" && prNum > 0 {
-				branch = s.getPRBranch(repoFullName, prNum)
-			}
-			// Note: If branch is empty, we fail later in the check
-			// Extract PR title and body for context
-			if title, ok := pr["title"].(string); ok {
-				prTitle = title
-			}
-			if b, ok := pr["body"].(string); ok {
-				prBody = b
-			}
-		}
-		if review, ok := payload["review"].(map[string]interface{}); ok {
-			if body, ok := review["body"].(string); ok {
-				// Build task description with context
-				var context strings.Builder
-				if prTitle != "" {
-					context.WriteString(fmt.Sprintf("PR Title: %s\n\n", prTitle))
-				}
-				if prBody != "" {
-					context.WriteString(fmt.Sprintf("PR Description:\n%s\n\n", prBody))
-				}
-				context.WriteString(fmt.Sprintf("Review Message:\n%s", body))
-				taskDesc = context.String()
-			}
-		}
-
-	case "pull_request_review_comment":
-		// Check action - only process new comments
-		if action, ok := payload["action"].(string); ok && action != "created" {
-			log.Printf("[WEBHOOK] Ignoring review comment with action: %s", action)
-			return
-		}
-		// Check sender - ignore comments from the bot itself
-		log.Printf("[WEBHOOK] Bot user ID: %s", s.githubUserID)
-		if sender, ok := payload["sender"].(map[string]interface{}); ok {
-			if senderID, ok := sender["id"].(float64); ok {
-				senderIDStr := strconv.FormatInt(int64(senderID), 10)
-				if s.githubUserID != "" && senderIDStr == s.githubUserID {
-					log.Printf("[WEBHOOK] Ignoring review comment from bot user")
-					return
-				}
-			}
-		}
-		var prTitle, prBody string
-		if comment, ok := payload["comment"].(map[string]interface{}); ok {
-			commentBody := ""
-			if body, ok := comment["body"].(string); ok {
-				commentBody = body
-			}
-			if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
-				if n, ok := pr["number"].(float64); ok {
-					prNum = int(n)
-				}
-				// Get repository full name first
-				var repoFullName string
-				if r, ok := pr["base"].(map[string]interface{})["repo"].(map[string]interface{}); ok {
-					if fullName, ok := r["full_name"].(string); ok {
-						repoFullName = fullName
-						repo = fullName
-					}
-				}
-				// Get actual branch name from GitHub API
-				if repoFullName != "" && prNum > 0 {
-					branch = s.getPRBranch(repoFullName, prNum)
-				}
-				// Note: If branch is empty, we fail later in the check
-				// Extract PR title and body for context
-				if title, ok := pr["title"].(string); ok {
-					prTitle = title
-				}
-				if b, ok := pr["body"].(string); ok {
-					prBody = b
-				}
-			}
-			// Build task description with context
-			if prTitle != "" || prBody != "" {
-				var context strings.Builder
-				if prTitle != "" {
-					context.WriteString(fmt.Sprintf("PR Title: %s\n\n", prTitle))
-				}
-				if prBody != "" {
-					context.WriteString(fmt.Sprintf("PR Description:\n%s\n\n", prBody))
-				}
-				context.WriteString(fmt.Sprintf("Comment:\n%s", commentBody))
-				taskDesc = context.String()
-			} else {
-				taskDesc = commentBody
-			}
-		}
-	}
-
-	if repo == "" || taskDesc == "" {
-		json.NewEncoder(w).Encode(map[string]string{"status": "ignored"})
-		return
-	}
-
-	// For PR comments, if branch is not found, fail the task
-	if prNum > 0 && branch == "" {
-		log.Printf("[WEBHOOK] PR branch not found for PR #%d, skipping task", prNum)
-		json.NewEncoder(w).Encode(Response{
-			Success: false,
-			Error:   fmt.Sprintf("PR branch not found for PR #%d", prNum),
-		})
-		return
-	}
-
-	// Create task
-	task = &Task{
-		ID:        fmt.Sprintf("task-%d-%s", time.Now().UnixNano()%100000, branch),
-		Repo:      repo,
-		Branch:    branch,
-		Task:      taskDesc,
-		PR:        prNum,
-		Status:    "queued",
-		CreatedAt: time.Now(),
-	}
-
-	s.submitTask(task)
-	log.Printf("[WEBHOOK] Created task %s for %s:%s", task.ID, repo, branch)
-
-	json.NewEncoder(w).Encode(Response{
-		Success: true,
-		TaskID:  task.ID,
-		Status:  "queued",
-		Repo:    repo,
-		Branch:  branch,
-	})
 }
 
 func extractTask(body string) string {
