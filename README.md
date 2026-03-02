@@ -1,5 +1,7 @@
 # gh-claude
 
+[English Version](./README_en.md)
+
 Claude Code Runner Service - 通过 GitHub Webhook 自动执行 Claude Code 任务的工具。
 
 ## 功能特性
