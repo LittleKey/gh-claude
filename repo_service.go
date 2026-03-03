@@ -8,7 +8,61 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// runGitCmdWithRetry runs a git command with exponential backoff retry (max 3 retries)
+func runGitCmdWithRetry(args ...string) error {
+	maxRetries := 3
+	baseDelay := 1 * time.Second
+
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		cmd := exec.Command("git", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		log.Printf("[REPO] Git command failed (attempt %d/%d): %v", attempt+1, maxRetries, err)
+
+		if attempt < maxRetries {
+			delay := baseDelay * (1 << attempt) // exponential backoff: 1s, 2s, 4s
+			log.Printf("[REPO] Retrying in %v...", delay)
+			time.Sleep(delay)
+		}
+	}
+	return lastErr
+}
+
+// runGitCmdWithRetryAt runs a git command in a specific directory with exponential backoff retry
+func runGitCmdWithRetryAt(dir string, args ...string) error {
+	maxRetries := 3
+	baseDelay := 1 * time.Second
+
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		log.Printf("[REPO] Git command failed at %s (attempt %d/%d): %v", dir, attempt+1, maxRetries, err)
+
+		if attempt < maxRetries {
+			delay := baseDelay * (1 << attempt) // exponential backoff: 1s, 2s, 4s
+			log.Printf("[REPO] Retrying in %v...", delay)
+			time.Sleep(delay)
+		}
+	}
+	return lastErr
+}
 
 // RepoService provides git operations for working with repositories
 type RepoService struct {
@@ -56,10 +110,7 @@ func (r *RepoService) SetupWorktree(repo, branch string, prNum int) (string, err
 	// Clone main repo if not exists
 	if _, err := os.Stat(mainRepoPath); os.IsNotExist(err) {
 		log.Printf("[REPO] Cloning %s to %s", repo, mainRepoPath)
-		cmd := exec.Command("git", "clone", "--bare", cloneURL, mainRepoPath)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		if err := runGitCmdWithRetry("clone", "--bare", cloneURL, mainRepoPath); err != nil {
 			return "", fmt.Errorf("failed to clone: %w", err)
 		}
 	} else {
@@ -101,14 +152,24 @@ func (r *RepoService) fetchMainRepo(mainRepoPath string) error {
 	cmd.Dir = mainRepoPath
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		log.Printf("[REPO] Failed to fetch origin: %v, retrying...", err)
+		if err := runGitCmdWithRetryAt(mainRepoPath, "fetch", "origin", "--depth=1"); err != nil {
+			return err
+		}
+	}
 
 	// Fetch all refs
 	cmd = exec.Command("git", "fetch", "origin", "refs/heads/*:refs/remotes/origin/*", "--depth=1")
 	cmd.Dir = mainRepoPath
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		log.Printf("[REPO] Failed to fetch all refs: %v, retrying...", err)
+		if err := runGitCmdWithRetryAt(mainRepoPath, "fetch", "origin", "refs/heads/*:refs/remotes/origin/*", "--depth=1"); err != nil {
+			return err
+		}
+	}
 
 	// Get default branch
 	defaultBranch := r.getDefaultBranch(mainRepoPath)
@@ -121,7 +182,12 @@ func (r *RepoService) fetchMainRepo(mainRepoPath string) error {
 	cmd.Dir = mainRepoPath
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		log.Printf("[REPO] Failed to fetch default branch: %v, retrying...", err)
+		if err := runGitCmdWithRetryAt(mainRepoPath, "fetch", "--force", "origin", fmt.Sprintf("refs/heads/%s:%s", defaultBranch, defaultBranch)); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -152,10 +218,10 @@ func (r *RepoService) getDefaultBranch(mainRepoPath string) string {
 
 // fetchPRBranches fetches PR-specific branches
 func (r *RepoService) fetchPRBranches(mainRepoPath string, prNum int) error {
-	// Fetch PR branch
-	prCmd := exec.Command("git", "fetch", "--force", "origin", fmt.Sprintf("pull/%d/head:pr-%d", prNum, prNum))
-	prCmd.Dir = mainRepoPath
-	prCmd.Run()
+	// Fetch PR branch with retry
+	if err := runGitCmdWithRetryAt(mainRepoPath, "fetch", "--force", "origin", fmt.Sprintf("pull/%d/head:pr-%d", prNum, prNum)); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -239,18 +305,14 @@ func (r *RepoService) setRemoteURL(worktreePath, remoteURL string) error {
 func (r *RepoService) SyncWorktree(worktreePath string) error {
 	log.Printf("[REPO] Syncing worktree at %s with remote", worktreePath)
 
-	// Fetch latest changes
-	cmd := exec.Command("git", "fetch", "origin")
-	cmd.Dir = worktreePath
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("[REPO] Failed to fetch: %v", err)
+	// Fetch latest changes with retry
+	if err := runGitCmdWithRetryAt(worktreePath, "fetch", "origin"); err != nil {
+		log.Printf("[REPO] Failed to fetch after retries: %v", err)
 		return err
 	}
 
 	// Get current branch
-	cmd = exec.Command("git", "branch", "--show-current")
+	cmd := exec.Command("git", "branch", "--show-current")
 	cmd.Dir = worktreePath
 	branch, err := cmd.Output()
 	if err != nil {
@@ -277,12 +339,20 @@ func (r *RepoService) SyncWorktree(worktreePath string) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			log.Printf("[WARN] Failed to pull: %v, resetting to remote", err)
-			cmd = exec.Command("git", "reset", "--hard", fmt.Sprintf("origin/%s", branchName))
-			cmd.Dir = worktreePath
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Run()
+			log.Printf("[REPO] Failed to pull: %v, retrying...", err)
+			if err := runGitCmdWithRetryAt(worktreePath, "pull", "--rebase", "origin", branchName); err != nil {
+				log.Printf("[WARN] Failed to pull after retries: %v, resetting to remote", err)
+				cmd = exec.Command("git", "reset", "--hard", fmt.Sprintf("origin/%s", branchName))
+				cmd.Dir = worktreePath
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					log.Printf("[REPO] Failed to reset: %v, retrying...", err)
+					if err := runGitCmdWithRetryAt(worktreePath, "reset", "--hard", fmt.Sprintf("origin/%s", branchName)); err != nil {
+						return err
+					}
+				}
+			}
 		}
 	}
 
@@ -314,13 +384,30 @@ func (r *RepoService) CommitAndPush(worktreePath, branch, commitMsg string) erro
 	commitCmd.Dir = worktreePath
 	commitCmd.Run() // Ignore error if nothing to commit
 
-	// Push
-	pushCmd := exec.Command("git", "push", "origin", branch)
-	pushCmd.Dir = worktreePath
-	pushCmd.Env = append(os.Environ(), "GIT_ASKPASS=true")
-	output, err := pushCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to push: %w, output: %s", err, string(output))
+	// Push with retry
+	maxRetries := 3
+	baseDelay := 1 * time.Second
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		pushCmd := exec.Command("git", "push", "origin", branch)
+		pushCmd.Dir = worktreePath
+		pushCmd.Env = append(os.Environ(), "GIT_ASKPASS=true")
+		output, err := pushCmd.CombinedOutput()
+		if err == nil {
+			break
+		}
+		lastErr = fmt.Errorf("failed to push: %w, output: %s", err, string(output))
+		log.Printf("[REPO] Push failed (attempt %d/%d): %v", attempt+1, maxRetries, err)
+
+		if attempt < maxRetries {
+			delay := baseDelay * (1 << attempt)
+			log.Printf("[REPO] Retrying push in %v...", delay)
+			time.Sleep(delay)
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to push after retries: %w", lastErr)
 	}
 
 	log.Printf("[REPO] Successfully pushed branch %s", branch)
