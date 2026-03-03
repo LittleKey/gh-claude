@@ -244,7 +244,10 @@ func (r *RepoService) SyncWorktree(worktreePath string) error {
 	cmd.Dir = worktreePath
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		log.Printf("[REPO] Failed to fetch: %v", err)
+		return err
+	}
 
 	// Get current branch
 	cmd = exec.Command("git", "branch", "--show-current")
