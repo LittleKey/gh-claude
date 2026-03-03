@@ -1,5 +1,5 @@
 // Package github provides GitHub interaction services using gh CLI
-package github
+package main
 
 import (
 	"encoding/json"
@@ -9,18 +9,18 @@ import (
 	"strconv"
 )
 
-// Service handles GitHub interactions (PR and Issue operations)
-type Service struct {
+// GitHubService handles GitHub interactions (PR and Issue operations)
+type GitHubService struct {
 	token string
 }
 
-// New creates a new GitHub service
-func New(token string) *Service {
-	return &Service{token: token}
+// NewGitHub creates a new GitHub service
+func NewGitHub(token string) *GitHubService {
+	return &GitHubService{token: token}
 }
 
 // AddPRComment adds a comment to a PR using gh CLI
-func (s *Service) AddPRComment(owner, repo string, prNumber int, body string) error {
+func (s *GitHubService) AddPRComment(owner, repo string, prNumber int, body string) error {
 	repoFullName := owner + "/" + repo
 	cmd := exec.Command("gh", "pr", "comment", strconv.Itoa(prNumber), "--body", body, "-R", repoFullName)
 	cmd.Dir = "/"
@@ -34,7 +34,7 @@ func (s *Service) AddPRComment(owner, repo string, prNumber int, body string) er
 }
 
 // AddIssueComment adds a comment to an Issue using gh CLI
-func (s *Service) AddIssueComment(owner, repo string, issueNumber int, body string) error {
+func (s *GitHubService) AddIssueComment(owner, repo string, issueNumber int, body string) error {
 	repoFullName := owner + "/" + repo
 	cmd := exec.Command("gh", "issue", "comment", strconv.Itoa(issueNumber), "--body", body, "-R", repoFullName)
 	cmd.Dir = "/"
@@ -48,7 +48,7 @@ func (s *Service) AddIssueComment(owner, repo string, issueNumber int, body stri
 }
 
 // GetPRBranch gets the actual branch name for a PR using gh CLI
-func (s *Service) GetPRBranch(repo string, prNum int) (string, error) {
+func (s *GitHubService) GetPRBranch(repo string, prNum int) (string, error) {
 	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(prNum), "--json", "headRefName", "-R", repo)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -66,7 +66,7 @@ func (s *Service) GetPRBranch(repo string, prNum int) (string, error) {
 }
 
 // CheckPRExists checks if a PR already exists for a given issue number
-func (s *Service) CheckPRExists(repo string, issueNum int) (bool, error) {
+func (s *GitHubService) CheckPRExists(repo string, issueNum int) (bool, error) {
 	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(issueNum), "--json", "url,number", "-R", repo)
 	_, err := cmd.CombinedOutput()
 	if err == nil {
@@ -76,7 +76,7 @@ func (s *Service) CheckPRExists(repo string, issueNum int) (bool, error) {
 }
 
 // CreatePR creates a PR for a branch
-func (s *Service) CreatePR(repo, branch, title, body, baseBranch string) (int, error) {
+func (s *GitHubService) CreatePR(repo, branch, title, body, baseBranch string) (int, error) {
 	cmd := exec.Command("gh", "pr", "create",
 		"--title", title,
 		"--body", body,
@@ -107,7 +107,7 @@ func (s *Service) CreatePR(repo, branch, title, body, baseBranch string) (int, e
 }
 
 // GetCurrentUserID gets the current GitHub user ID
-func (s *Service) GetCurrentUserID() (string, error) {
+func (s *GitHubService) GetCurrentUserID() (string, error) {
 	cmd := exec.Command("gh", "api", "user", "--jq", ".id")
 	cmd.Env = append(os.Environ(), "GH_TOKEN="+s.token)
 	output, err := cmd.CombinedOutput()

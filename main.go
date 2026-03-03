@@ -16,9 +16,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-
-	"github.com/littlekey/gh-claude/code"
-	"github.com/littlekey/gh-claude/server"
 )
 
 var (
@@ -36,7 +33,7 @@ func main() {
 	dataDir := "/tmp/claude-data"
 
 	// Initialize server
-	svc, err := server.New(*workDir, dataDir, *maxConcurrent, *githubToken, *webhookURL)
+	svc, err := NewServer(*workDir, dataDir, *maxConcurrent, *githubToken, *webhookURL)
 	if err != nil {
 		log.Fatalf("Failed to initialize server: %v", err)
 	}
@@ -53,7 +50,7 @@ func main() {
 	}
 
 	// Initialize Claude settings
-	codeSvc := code.New()
+	codeSvc := NewCodeService()
 	if err := codeSvc.InitSettings(); err != nil {
 		log.Printf("[WARN] Failed to initialize Claude settings: %v", err)
 	}

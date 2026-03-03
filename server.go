@@ -1,5 +1,5 @@
 // Package server provides HTTP server and handlers
-package server
+package main
 
 import (
 	"encoding/json"
@@ -13,11 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/littlekey/gh-claude/code"
-	"github.com/littlekey/gh-claude/github"
-	"github.com/littlekey/gh-claude/repo"
-	"github.com/littlekey/gh-claude/task"
 )
 
 // Request represents a task submission request
@@ -44,33 +39,33 @@ type Response struct {
 // BranchLock represents a branch-level lock
 type BranchLock struct {
 	mu      sync.Mutex
-	queue   []*task.Task
-	running *task.Task
+	queue   []*Task
+	running *Task
 }
 
 // Server provides HTTP server functionality
 type Server struct {
 	mu            sync.Mutex
-	tasks         map[string]*task.Task       // taskID -> Task
-	branchLocks   map[string]*BranchLock       // "repo:branch" -> BranchLock
-	taskQueue     []*task.Task                 // Global queue for unassigned tasks
+	tasks         map[string]*Task       // taskID -> Task
+	branchLocks   map[string]*BranchLock // "repo:branch" -> BranchLock
+	taskQueue     []*Task                 // Global queue for unassigned tasks
 	workDir       string
 	dataDir       string
 	maxConcurrent int
-	github        *github.Service
-	repoService   *repo.Service
-	codeService   *code.Service
-	taskRepo      *task.Repo
+	github        *GitHubService
+	repoService   *RepoService
+	codeService   *CodeService
+	taskRepo      *TaskRepo
 	webhookURL    string
 	activeCount   int
 }
 
-// New creates a new HTTP server
-func New(workDir, dataDir string, maxConcurrent int, githubToken, webhookURL string) (*Server, error) {
-	gh := github.New(githubToken)
-	rs := repo.New(workDir, githubToken)
-	cs := code.New()
-	tr, err := task.New(dataDir)
+// NewServer creates a new HTTP server
+func NewServer(workDir, dataDir string, maxConcurrent int, githubToken, webhookURL string) (*Server, error) {
+	gh := NewGitHub(githubToken)
+	rs := NewRepoService(workDir, githubToken)
+	cs := NewCodeService()
+	tr, err := NewTaskRepo(dataDir)
 	if err != nil {
 		return nil, err
 	}
@@ -84,9 +79,9 @@ func New(workDir, dataDir string, maxConcurrent int, githubToken, webhookURL str
 	}
 
 	return &Server{
-		tasks:         make(map[string]*task.Task),
+		tasks:         make(map[string]*Task),
 		branchLocks:   make(map[string]*BranchLock),
-		taskQueue:     make([]*task.Task, 0),
+		taskQueue:     make([]*Task, 0),
 		workDir:       workDir,
 		dataDir:       dataDir,
 		maxConcurrent: maxConcurrent,
@@ -204,7 +199,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create task
-	t := &task.Task{
+	t := &Task{
 		ID:        fmt.Sprintf("task-%d-%s", time.Now().UnixNano()%100000, branch),
 		Repo:      req.Repo,
 		Branch:    branch,
@@ -230,7 +225,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) submitTask(t *task.Task) {
+func (s *Server) submitTask(t *Task) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -248,7 +243,7 @@ func (s *Server) submitTask(t *task.Task) {
 	bl, exists := s.branchLocks[lockKey]
 	if !exists {
 		bl = &BranchLock{
-			queue: make([]*task.Task, 0),
+			queue: make([]*Task, 0),
 		}
 		s.branchLocks[lockKey] = bl
 	}
@@ -267,7 +262,7 @@ func (s *Server) submitTask(t *task.Task) {
 	}
 }
 
-func (s *Server) restoreTask(t *task.Task) {
+func (s *Server) restoreTask(t *Task) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -278,7 +273,7 @@ func (s *Server) restoreTask(t *task.Task) {
 	bl, exists := s.branchLocks[lockKey]
 	if !exists {
 		bl = &BranchLock{
-			queue: make([]*task.Task, 0),
+			queue: make([]*Task, 0),
 		}
 		s.branchLocks[lockKey] = bl
 	}
@@ -327,7 +322,7 @@ func (s *Server) processQueue() {
 	}
 }
 
-func (s *Server) executeTask(t *task.Task, bl *BranchLock, lockKey string) {
+func (s *Server) executeTask(t *Task, bl *BranchLock, lockKey string) {
 	log.Printf("[EXEC] Starting task %s for repo=%s branch=%s", t.ID, t.Repo, t.Branch)
 
 	t.Status = "running"
@@ -402,7 +397,7 @@ func (s *Server) executeTask(t *task.Task, bl *BranchLock, lockKey string) {
 	s.completeTask(t, bl, lockKey)
 }
 
-func (s *Server) pushChanges(t *task.Task) {
+func (s *Server) pushChanges(t *Task) {
 	if t.WorkTree == "" || t.Status != "completed" {
 		return
 	}
@@ -426,7 +421,7 @@ func (s *Server) pushChanges(t *task.Task) {
 	}
 }
 
-func (s *Server) createPRIfNeeded(t *task.Task) int {
+func (s *Server) createPRIfNeeded(t *Task) int {
 	// Extract issue number from branch name
 	issueNum := 0
 	if _, err := fmt.Sscanf(t.Branch, "fix-issue-%d", &issueNum); err != nil {
@@ -456,7 +451,7 @@ func (s *Server) createPRIfNeeded(t *task.Task) int {
 	return prNum
 }
 
-func (s *Server) notifyGitHub(t *task.Task, success bool) {
+func (s *Server) notifyGitHub(t *Task, success bool) {
 	if s.github == nil {
 		return
 	}
@@ -507,7 +502,7 @@ func (s *Server) notifyGitHub(t *task.Task, success bool) {
 	}
 }
 
-func (s *Server) completeTask(t *task.Task, bl *BranchLock, lockKey string) {
+func (s *Server) completeTask(t *Task, bl *BranchLock, lockKey string) {
 	s.mu.Lock()
 	s.activeCount--
 
@@ -547,7 +542,7 @@ func (s *Server) completeTask(t *task.Task, bl *BranchLock, lockKey string) {
 	}
 }
 
-func (s *Server) sendWebhook(t *task.Task) {
+func (s *Server) sendWebhook(t *Task) {
 	payload := map[string]interface{}{
 		"task_id":  t.ID,
 		"repo":     t.Repo,
@@ -675,7 +670,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	eventType := r.Header.Get("X-GitHub-Event")
 	log.Printf("[WEBHOOK] Received event: %s", eventType)
 
-	var t *task.Task
+	var t *Task
 	var repo, branch, taskDesc string
 	var prNum int
 
@@ -711,7 +706,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create task
-	t = &task.Task{
+	t = &Task{
 		ID:        fmt.Sprintf("task-%d-%s", time.Now().UnixNano()%100000, branch),
 		Repo:      repo,
 		Branch:    branch,
@@ -733,7 +728,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleIssueComment(payload map[string]interface{}) (*task.Task, string, string, int, string) {
+func (s *Server) handleIssueComment(payload map[string]interface{}) (*Task, string, string, int, string) {
 	// Check action - only process new comments
 	if action, ok := payload["action"].(string); ok && action != "created" {
 		return nil, "", "", 0, ""
@@ -752,7 +747,7 @@ func (s *Server) handleIssueComment(payload map[string]interface{}) (*task.Task,
 				var issueTitle, issueBody string
 				if issue, ok := payload["issue"].(map[string]interface{}); ok {
 					if n, ok := issue["number"].(float64); ok {
-						if pr, ok := issue["pull_request"].(map[string]interface{}); ok && pr != nil {
+						if pr, ok := issue["pull_request"].(map[string]interface{}); pr != nil {
 							prNum = int(n)
 							if r, ok := payload["repository"].(map[string]interface{}); ok {
 								if fullName, ok := r["full_name"].(string); ok {
@@ -798,13 +793,14 @@ func (s *Server) handleIssueComment(payload map[string]interface{}) (*task.Task,
 	return nil, repo, branch, prNum, taskDesc
 }
 
-func (s *Server) handlePullRequestReview(payload map[string]interface{}) (*task.Task, string, string, int, string) {
+func (s *Server) handlePullRequestReview(payload map[string]interface{}) (*Task, string, string, int, string) {
 	if action, ok := payload["action"].(string); ok && action != "submitted" {
 		return nil, "", "", 0, ""
 	}
 
 	var repo, branch, taskDesc string
-	var prNum, prTitle, prBody string
+	var prNum int
+	var prTitle, prBody string
 
 	if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
 		if n, ok := pr["number"].(float64); ok {
@@ -843,13 +839,14 @@ func (s *Server) handlePullRequestReview(payload map[string]interface{}) (*task.
 	return nil, repo, branch, prNum, taskDesc
 }
 
-func (s *Server) handlePullRequestReviewComment(payload map[string]interface{}) (*task.Task, string, string, int, string) {
+func (s *Server) handlePullRequestReviewComment(payload map[string]interface{}) (*Task, string, string, int, string) {
 	if action, ok := payload["action"].(string); ok && action != "created" {
 		return nil, "", "", 0, ""
 	}
 
 	var repo, branch, taskDesc string
-	var prNum, prTitle, prBody string
+	var prNum int
+	var prTitle, prBody string
 
 	if comment, ok := payload["comment"].(map[string]interface{}); ok {
 		if body, ok := comment["body"].(string); ok {

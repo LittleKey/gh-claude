@@ -1,5 +1,5 @@
 // Package repo provides repository (git worktree) operations
-package repo
+package main
 
 import (
 	"fmt"
@@ -9,42 +9,37 @@ import (
 	"strings"
 )
 
-type Config struct {
-	WorkDir string
-	Token   string
-}
-
-type Service struct {
+type RepoService struct {
 	workDir string
 	token   string
 }
 
-func New(workDir, token string) *Service {
-	return &Service{
+func NewRepoService(workDir, token string) *RepoService {
+	return &RepoService{
 		workDir: workDir,
 		token:   token,
 	}
 }
 
 // CloneURL returns the clone URL with credentials
-func (s *Service) CloneURL(repo string) string {
+func (s *RepoService) CloneURL(repo string) string {
 	return fmt.Sprintf("https://%s@github.com/%s.git", s.token, repo)
 }
 
 // MainRepoPath returns the path to the main (bare) repo
-func (s *Service) MainRepoPath(repo string) string {
+func (s *RepoService) MainRepoPath(repo string) string {
 	repoSafe := strings.ReplaceAll(repo, "/", "-")
 	return filepath.Join(s.workDir, repoSafe, ".main")
 }
 
 // WorktreePath returns the path to a worktree for the given branch
-func (s *Service) WorktreePath(repo, branch string) string {
+func (s *RepoService) WorktreePath(repo, branch string) string {
 	repoSafe := strings.ReplaceAll(repo, "/", "-")
 	return filepath.Join(s.workDir, repoSafe, branch)
 }
 
 // EnsureMainRepo ensures the main (bare) repo exists, cloning if needed
-func (s *Service) EnsureMainRepo(repo string) error {
+func (s *RepoService) EnsureMainRepo(repo string) error {
 	mainPath := s.MainRepoPath(repo)
 	if _, err := os.Stat(mainPath); os.IsNotExist(err) {
 		cloneURL := s.CloneURL(repo)
@@ -61,7 +56,7 @@ func (s *Service) EnsureMainRepo(repo string) error {
 }
 
 // fetchMainRepo fetches latest changes from remote
-func (s *Service) fetchMainRepo(repo string) error {
+func (s *RepoService) fetchMainRepo(repo string) error {
 	mainPath := s.MainRepoPath(repo)
 
 	// Fetch both the default branch and origin/HEAD
@@ -84,7 +79,7 @@ func (s *Service) fetchMainRepo(repo string) error {
 }
 
 // GetDefaultBranch gets the default branch name from remote
-func (s *Service) GetDefaultBranch(repo string) (string, error) {
+func (s *RepoService) GetDefaultBranch(repo string) (string, error) {
 	mainPath := s.MainRepoPath(repo)
 
 	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
@@ -110,7 +105,7 @@ func (s *Service) GetDefaultBranch(repo string) (string, error) {
 }
 
 // UpdateDefaultBranch updates the local default branch to match remote
-func (s *Service) UpdateDefaultBranch(repo, defaultBranch string) error {
+func (s *RepoService) UpdateDefaultBranch(repo, defaultBranch string) error {
 	mainPath := s.MainRepoPath(repo)
 
 	cmd := exec.Command("git", "fetch", "--force", "origin", fmt.Sprintf("refs/heads/%s:%s", defaultBranch, defaultBranch))
@@ -121,7 +116,7 @@ func (s *Service) UpdateDefaultBranch(repo, defaultBranch string) error {
 }
 
 // FetchPRBranch fetches the PR branch from remote
-func (s *Service) FetchPRBranch(repo string, prNum int) error {
+func (s *RepoService) FetchPRBranch(repo string, prNum int) error {
 	mainPath := s.MainRepoPath(repo)
 
 	cmd := exec.Command("git", "fetch", "origin", fmt.Sprintf("pull/%d/head:pr-%d", prNum, prNum))
@@ -130,7 +125,7 @@ func (s *Service) FetchPRBranch(repo string, prNum int) error {
 }
 
 // BranchExists checks if a branch exists locally
-func (s *Service) BranchExists(repo, branch string) bool {
+func (s *RepoService) BranchExists(repo, branch string) bool {
 	mainPath := s.MainRepoPath(repo)
 
 	checkCmd := exec.Command("git", "rev-parse", "--verify", fmt.Sprintf("refs/heads/%s", branch))
@@ -139,7 +134,7 @@ func (s *Service) BranchExists(repo, branch string) bool {
 }
 
 // CreateWorktree creates a new worktree for the given branch
-func (s *Service) CreateWorktree(repo, branch, worktreePath, baseBranch string) error {
+func (s *RepoService) CreateWorktree(repo, branch, worktreePath, baseBranch string) error {
 	mainPath := s.MainRepoPath(repo)
 
 	// Ensure main repo exists
@@ -173,7 +168,7 @@ func (s *Service) CreateWorktree(repo, branch, worktreePath, baseBranch string) 
 }
 
 // ConfigureWorktree configures git user and remote for the worktree
-func (s *Service) ConfigureWorktree(worktreePath, repo string) error {
+func (s *RepoService) ConfigureWorktree(worktreePath, repo string) error {
 	// Configure git user
 	cmds := []*exec.Cmd{
 		exec.Command("git", "config", "user.email", "claude-runner@local"),
@@ -192,7 +187,7 @@ func (s *Service) ConfigureWorktree(worktreePath, repo string) error {
 }
 
 // Fetch fetches latest changes in worktree
-func (s *Service) Fetch(worktreePath string) error {
+func (s *RepoService) Fetch(worktreePath string) error {
 	cmd := exec.Command("git", "fetch", "origin")
 	cmd.Dir = worktreePath
 	cmd.Stdout = os.Stdout
@@ -201,7 +196,7 @@ func (s *Service) Fetch(worktreePath string) error {
 }
 
 // GetCurrentBranch gets the current branch name
-func (s *Service) GetCurrentBranch(worktreePath string) (string, error) {
+func (s *RepoService) GetCurrentBranch(worktreePath string) (string, error) {
 	cmd := exec.Command("git", "branch", "--show-current")
 	cmd.Dir = worktreePath
 	output, err := cmd.Output()
@@ -212,7 +207,7 @@ func (s *Service) GetCurrentBranch(worktreePath string) (string, error) {
 }
 
 // IsBehindRemote checks if branch is behind origin
-func (s *Service) IsBehindRemote(worktreePath, branch string) (bool, error) {
+func (s *RepoService) IsBehindRemote(worktreePath, branch string) (bool, error) {
 	cmd := exec.Command("git", "rev-list", "--count", fmt.Sprintf("HEAD..origin/%s", branch))
 	cmd.Dir = worktreePath
 	output, err := cmd.Output()
@@ -224,7 +219,7 @@ func (s *Service) IsBehindRemote(worktreePath, branch string) (bool, error) {
 }
 
 // Pull pulls changes from remote
-func (s *Service) Pull(worktreePath, branch string) error {
+func (s *RepoService) Pull(worktreePath, branch string) error {
 	cmd := exec.Command("git", "pull", "--rebase", "origin", branch)
 	cmd.Dir = worktreePath
 	cmd.Stdout = os.Stdout
@@ -233,7 +228,7 @@ func (s *Service) Pull(worktreePath, branch string) error {
 }
 
 // ResetToRemote resets branch to match origin
-func (s *Service) ResetToRemote(worktreePath, branch string) error {
+func (s *RepoService) ResetToRemote(worktreePath, branch string) error {
 	cmd := exec.Command("git", "reset", "--hard", fmt.Sprintf("origin/%s", branch))
 	cmd.Dir = worktreePath
 	cmd.Stdout = os.Stdout
@@ -242,7 +237,7 @@ func (s *Service) ResetToRemote(worktreePath, branch string) error {
 }
 
 // SyncWorktree syncs worktree with remote, handling conflicts
-func (s *Service) SyncWorktree(worktreePath string) error {
+func (s *RepoService) SyncWorktree(worktreePath string) error {
 	// Fetch latest changes
 	if err := s.Fetch(worktreePath); err != nil {
 		return err
@@ -273,7 +268,7 @@ func (s *Service) SyncWorktree(worktreePath string) error {
 }
 
 // HasChanges checks if there are uncommitted changes
-func (s *Service) HasChanges(worktreePath string) (bool, error) {
+func (s *RepoService) HasChanges(worktreePath string) (bool, error) {
 	cmd := exec.Command("git", "status", "--porcelain")
 	cmd.Dir = worktreePath
 	output, err := cmd.Output()
@@ -284,7 +279,7 @@ func (s *Service) HasChanges(worktreePath string) (bool, error) {
 }
 
 // StageChanges stages all changes
-func (s *Service) StageChanges(worktreePath string) error {
+func (s *RepoService) StageChanges(worktreePath string) error {
 	cmd := exec.Command("git", "add", "-A")
 	cmd.Dir = worktreePath
 	_, err := cmd.CombinedOutput()
@@ -292,7 +287,7 @@ func (s *Service) StageChanges(worktreePath string) error {
 }
 
 // Commit creates a commit with the given message
-func (s *Service) Commit(worktreePath, msg string) error {
+func (s *RepoService) Commit(worktreePath, msg string) error {
 	cmd := exec.Command("git", "commit", "-m", msg)
 	cmd.Dir = worktreePath
 	_, err := cmd.CombinedOutput()
@@ -300,7 +295,7 @@ func (s *Service) Commit(worktreePath, msg string) error {
 }
 
 // Push pushes changes to remote
-func (s *Service) Push(worktreePath, branch string) error {
+func (s *RepoService) Push(worktreePath, branch string) error {
 	cmd := exec.Command("git", "push", "origin", branch)
 	cmd.Dir = worktreePath
 	cmd.Env = append(os.Environ(), "GIT_ASKPASS=true")
@@ -309,7 +304,7 @@ func (s *Service) Push(worktreePath, branch string) error {
 }
 
 // PushChanges commits and pushes all changes
-func (s *Service) PushChanges(worktreePath, branch, commitMsg string) error {
+func (s *RepoService) PushChanges(worktreePath, branch, commitMsg string) error {
 	hasChanges, err := s.HasChanges(worktreePath)
 	if err != nil || !hasChanges {
 		return err
@@ -328,7 +323,7 @@ func (s *Service) PushChanges(worktreePath, branch, commitMsg string) error {
 }
 
 // EnsureWorktree ensures a worktree exists and is synced for the given branch
-func (s *Service) EnsureWorktree(repo, branch string, prNum int) (string, error) {
+func (s *RepoService) EnsureWorktree(repo, branch string, prNum int) (string, error) {
 	worktreePath := s.WorktreePath(repo, branch)
 
 	// Ensure parent directory exists

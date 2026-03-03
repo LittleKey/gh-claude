@@ -1,5 +1,5 @@
 // Package code provides Claude Code execution services
-package code
+package main
 
 import (
 	"bytes"
@@ -10,21 +10,21 @@ import (
 	"path/filepath"
 )
 
-type Service struct{}
+type CodeService struct{}
 
-// New creates a new Code service
-func New() *Service {
-	return &Service{}
+// NewCodeService creates a new Code service
+func NewCodeService() *CodeService {
+	return &CodeService{}
 }
 
-// Result holds the execution result
-type Result struct {
+// CodeResult holds the execution result
+type CodeResult struct {
 	Output string
 	Error  error
 }
 
 // UpdateSettings updates Claude settings.json with environment variables
-func (s *Service) UpdateSettings() error {
+func (s *CodeService) UpdateSettings() error {
 	homeDir := os.Getenv("HOME")
 	if homeDir == "" {
 		homeDir = "/home/appuser"
@@ -92,9 +92,10 @@ func (s *Service) UpdateSettings() error {
 }
 
 // UpdateSettingsForWorktree updates settings for a specific worktree execution
-func (s *Service) UpdateSettingsForWorktree(worktreePath string) error {
+func (s *CodeService) UpdateSettingsForWorktree(worktreePath string) error {
 	settingsPath := filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
-	if data, err := os.ReadFile(settingsPath); err != nil {
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
 		return err
 	}
 
@@ -137,7 +138,7 @@ func (s *Service) UpdateSettingsForWorktree(worktreePath string) error {
 }
 
 // BuildTask returns a build task description
-func (s *Service) BuildTask() string {
+func (s *CodeService) BuildTask() string {
 	return `请执行以下操作：
 1. 安装项目依赖
 2. 编译项目确认可以构建成功
@@ -147,13 +148,13 @@ func (s *Service) BuildTask() string {
 }
 
 // RunBuild runs the build step in a worktree
-func (s *Service) RunBuild(worktreePath string) Result {
+func (s *CodeService) RunBuild(worktreePath string) CodeResult {
 	buildTask := s.BuildTask()
 	return s.Run(worktreePath, buildTask)
 }
 
 // Run runs a Claude task in a worktree
-func (s *Service) Run(worktreePath, task string) Result {
+func (s *CodeService) Run(worktreePath, task string) CodeResult {
 	cmd := exec.Command("claude", "--dangerously-skip-permissions", task)
 	cmd.Dir = worktreePath
 	cmd.Env = s.buildEnv()
@@ -166,20 +167,20 @@ func (s *Service) Run(worktreePath, task string) Result {
 	output := stdout.String() + stderr.String()
 
 	if err != nil {
-		return Result{
+		return CodeResult{
 			Output: output,
 			Error:  fmt.Errorf("claude error: %v", err),
 		}
 	}
 
-	return Result{
+	return CodeResult{
 		Output: output,
 		Error:  nil,
 	}
 }
 
 // RunWithOutput runs a Claude task and streams output to the given writer
-func (s *Service) RunWithOutput(worktreePath, task string, output func(string)) Result {
+func (s *CodeService) RunWithOutput(worktreePath, task string, output func(string)) CodeResult {
 	cmd := exec.Command("claude", "--dangerously-skip-permissions", task)
 	cmd.Dir = worktreePath
 	cmd.Env = s.buildEnv()
@@ -193,20 +194,20 @@ func (s *Service) RunWithOutput(worktreePath, task string, output func(string)) 
 	output(stderr.String())
 
 	if err != nil {
-		return Result{
+		return CodeResult{
 			Output: stdout.String() + stderr.String(),
 			Error:  fmt.Errorf("claude error: %v", err),
 		}
 	}
 
-	return Result{
+	return CodeResult{
 		Output: stdout.String() + stderr.String(),
 		Error:  nil,
 	}
 }
 
 // buildEnv builds the environment variables for Claude execution
-func (s *Service) buildEnv() []string {
+func (s *CodeService) buildEnv() []string {
 	env := []string{
 		"CLAUDE_API_KEY=" + os.Getenv("ANTHROPIC_API_KEY"),
 		"ANTHROPIC_API_KEY=" + os.Getenv("ANTHROPIC_API_KEY"),
@@ -226,7 +227,7 @@ func (s *Service) buildEnv() []string {
 }
 
 // InitSettings initializes Claude settings and git config
-func (s *Service) InitSettings() error {
+func (s *CodeService) InitSettings() error {
 	// Update settings
 	if err := s.UpdateSettings(); err != nil {
 		return err

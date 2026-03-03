@@ -1,5 +1,5 @@
 // Package task provides task persistence services
-package task
+package main
 
 import (
 	"database/sql"
@@ -32,14 +32,14 @@ type Task struct {
 	CommentID  int       `json:"comment_id,omitempty"`  // For tracking comment
 }
 
-// Repo provides task persistence operations
-type Repo struct {
+// TaskRepo provides task persistence operations
+type TaskRepo struct {
 	db     *sql.DB
 	dbPath string
 }
 
-// New creates a new task repository
-func New(dataDir string) (*Repo, error) {
+// NewTaskRepo creates a new task repository
+func NewTaskRepo(dataDir string) (*TaskRepo, error) {
 	// Ensure data directory exists
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
@@ -51,7 +51,7 @@ func New(dataDir string) (*Repo, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	repo := &Repo{
+	repo := &TaskRepo{
 		db:     db,
 		dbPath: dbPath,
 	}
@@ -65,12 +65,12 @@ func New(dataDir string) (*Repo, error) {
 }
 
 // Close closes the database connection
-func (r *Repo) Close() error {
+func (r *TaskRepo) Close() error {
 	return r.db.Close()
 }
 
 // init creates the database schema
-func (r *Repo) init() error {
+func (r *TaskRepo) init() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS tasks (
 		id TEXT PRIMARY KEY,
@@ -100,7 +100,7 @@ func (r *Repo) init() error {
 }
 
 // Save saves or updates a task in the database
-func (r *Repo) Save(task *Task) error {
+func (r *TaskRepo) Save(task *Task) error {
 	log.Printf("[DB] Saving task %s (status: %s) to database", task.ID, task.Status)
 
 	// Convert bool to int for SQLite
@@ -162,7 +162,7 @@ func (r *Repo) Save(task *Task) error {
 }
 
 // LoadPending loads all tasks with status "queued" or "running"
-func (r *Repo) LoadPending() ([]*Task, error) {
+func (r *TaskRepo) LoadPending() ([]*Task, error) {
 	log.Printf("[DB] Loading pending tasks from database...")
 
 	query := `
@@ -200,7 +200,7 @@ func (r *Repo) LoadPending() ([]*Task, error) {
 }
 
 // GetByPR gets the latest completed task for a given PR
-func (r *Repo) GetByPR(repo string, prNum int) (*Task, error) {
+func (r *TaskRepo) GetByPR(repo string, prNum int) (*Task, error) {
 	query := `
 	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
 		   created_at, started_at, ended_at, result, error, worktree,
@@ -216,7 +216,7 @@ func (r *Repo) GetByPR(repo string, prNum int) (*Task, error) {
 }
 
 // GetByBranch gets the latest completed task for a given branch
-func (r *Repo) GetByBranch(repo, branch string) (*Task, error) {
+func (r *TaskRepo) GetByBranch(repo, branch string) (*Task, error) {
 	query := `
 	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
 		   created_at, started_at, ended_at, result, error, worktree,
@@ -232,7 +232,7 @@ func (r *Repo) GetByBranch(repo, branch string) (*Task, error) {
 }
 
 // scanTask scans a task from a rows iterator
-func (r *Repo) scanTask(rows *sql.Rows) (*Task, error) {
+func (r *TaskRepo) scanTask(rows *sql.Rows) (*Task, error) {
 	var task Task
 	var taskDesc, result, errorStr, worktree string
 	var prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
@@ -265,7 +265,7 @@ func (r *Repo) scanTask(rows *sql.Rows) (*Task, error) {
 }
 
 // scanTaskRow scans a task from a single row
-func (r *Repo) scanTaskRow(row *sql.Row) (*Task, error) {
+func (r *TaskRepo) scanTaskRow(row *sql.Row) (*Task, error) {
 	var task Task
 	var taskDesc, result, errorStr, worktree string
 	var prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
@@ -301,7 +301,7 @@ func (r *Repo) scanTaskRow(row *sql.Row) (*Task, error) {
 }
 
 // hydrateTask converts database fields to Task struct
-func (r *Repo) hydrateTask(task *Task, taskDesc, result, errorStr, worktree, status string, prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64, createdAt, startedAt, endedAt int64) *Task {
+func (r *TaskRepo) hydrateTask(task *Task, taskDesc, result, errorStr, worktree, status string, prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64, createdAt, startedAt, endedAt int64) *Task {
 	task.Task = taskDesc
 	task.Result = result
 	task.Error = errorStr
@@ -323,6 +323,6 @@ func (r *Repo) hydrateTask(task *Task, taskDesc, result, errorStr, worktree, sta
 }
 
 // DB returns the underlying database connection
-func (r *Repo) DB() *sql.DB {
+func (r *TaskRepo) DB() *sql.DB {
 	return r.db
 }
