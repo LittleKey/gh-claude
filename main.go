@@ -877,19 +877,27 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 		}
 	}
 
-	// For PR, fetch the PR branch
+	// For PR, fetch and force update the PR branch and base branch
 	if task.PR > 0 {
-		prCmd := exec.Command("git", "fetch", "origin", fmt.Sprintf("pull/%d/head:pr-%d", task.PR, task.PR))
+		// Fetch and force update PR branch
+		prCmd := exec.Command("git", "fetch", "--force", "origin", fmt.Sprintf("pull/%d/head:pr-%d", task.PR, task.PR))
 		prCmd.Dir = mainRepoPath
 		prCmd.Run() // Ignore error, branch might not exist
 
-		// Also fetch the base branch so we can rebase properly
+		// Also fetch and force update the base branch so we can rebase properly
 		baseBranch := s.getPRBaseBranch(task.Repo, task.PR)
 		if baseBranch != "" {
-			baseCmd := exec.Command("git", "fetch", "origin", fmt.Sprintf("refs/heads/%s:%s", baseBranch, baseBranch))
+			baseCmd := exec.Command("git", "fetch", "--force", "origin", fmt.Sprintf("refs/heads/%s:%s", baseBranch, baseBranch))
 			baseCmd.Dir = mainRepoPath
 			if err := baseCmd.Run(); err != nil {
 				log.Printf("[WARN] Failed to fetch base branch %s: %v", baseBranch, err)
+			}
+
+			// Force update local base branch to ensure we have the latest
+			updateBaseCmd := exec.Command("git", "update-ref", "refs/heads/"+baseBranch, "origin/"+baseBranch)
+			updateBaseCmd.Dir = mainRepoPath
+			if err := updateBaseCmd.Run(); err != nil {
+				log.Printf("[WARN] Failed to update local base branch %s: %v", baseBranch, err)
 			}
 		}
 	}
