@@ -747,7 +747,7 @@ func (s *Server) handleIssueComment(payload map[string]interface{}) (*Task, stri
 				var issueTitle, issueBody string
 				if issue, ok := payload["issue"].(map[string]interface{}); ok {
 					if n, ok := issue["number"].(float64); ok {
-						if pr, ok := issue["pull_request"].(map[string]interface{}); pr != nil {
+						if pr, _ := issue["pull_request"].(map[string]interface{}); pr != nil {
 							prNum = int(n)
 							if r, ok := payload["repository"].(map[string]interface{}); ok {
 								if fullName, ok := r["full_name"].(string); ok {
