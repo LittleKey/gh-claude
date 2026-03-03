@@ -279,16 +279,12 @@ func (s *Service) processQueue() {
 func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 	log.Printf("[EXEC] Starting task %s for repo=%s branch=%s PR=%d", task.ID, task.Repo, task.Branch, task.PR)
 
-	// Fetch previous task context
+	// Fetch previous task context (only for PR-triggered tasks, not for issue-triggered tasks)
 	var prevTaskContext string
 	if task.PR > 0 && task.Repo != "" && task.Branch != "" {
 		if prevTask, err := s.taskRepo.GetLatestByPR(task.Repo, task.PR); err == nil && prevTask != nil && prevTask.ID != task.ID {
 			prevTaskContext = buildPreviousTaskContext(prevTask)
 		} else if prevTask, err := s.taskRepo.GetLatestByBranch(task.Repo, task.Branch); err == nil && prevTask != nil && prevTask.ID != task.ID {
-			prevTaskContext = buildPreviousTaskContext(prevTask)
-		}
-	} else if task.Branch != "" && task.Repo != "" {
-		if prevTask, err := s.taskRepo.GetLatestByBranch(task.Repo, task.Branch); err == nil && prevTask != nil && prevTask.ID != task.ID {
 			prevTaskContext = buildPreviousTaskContext(prevTask)
 		}
 	}
