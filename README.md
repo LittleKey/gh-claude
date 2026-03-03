@@ -70,7 +70,7 @@ make build
 或手动编译:
 
 ```bash
-go build -o gh-claude main.go
+go build -o gh-claude
 ```
 
 ### 运行

@@ -10,7 +10,7 @@ gh-claude is a Claude Code Runner Service that executes Claude Code tasks on Git
 
 ```bash
 # Build the service
-go build -o gh-claude main.go
+go build -o gh-claude
 
 # Run the service
 ./gh-claude [-port=3456] [-work-dir=/tmp/claude-runner] [-max-concurrent=5]
@@ -30,18 +30,19 @@ The service is a single-file Go application (main.go) providing an HTTP API:
 
 ### API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/run` | POST | Submit a new task |
-| `/status` | GET | Get task status by `task_id` |
-| `/queue` | GET | List all tasks and branch queues |
-| `/cancel` | POST | Cancel a queued task by `task_id` |
-| `/webhook` | POST | GitHub webhook receiver |
-| `/health` | GET | Health check with active/queued task counts |
+| Endpoint   | Method | Description                                 |
+| ---------- | ------ | ------------------------------------------- |
+| `/run`     | POST   | Submit a new task                           |
+| `/status`  | GET    | Get task status by `task_id`                |
+| `/queue`   | GET    | List all tasks and branch queues            |
+| `/cancel`  | POST   | Cancel a queued task by `task_id`           |
+| `/webhook` | POST   | GitHub webhook receiver                     |
+| `/health`  | GET    | Health check with active/queued task counts |
 
 ### Request/Response Format
 
 **POST /run**:
+
 ```json
 {
   "repo": "owner/repo",

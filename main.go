@@ -882,6 +882,16 @@ func (s *Service) setupWorktree(task *Task, mainRepoPath, worktreePath string) e
 		prCmd := exec.Command("git", "fetch", "origin", fmt.Sprintf("pull/%d/head:pr-%d", task.PR, task.PR))
 		prCmd.Dir = mainRepoPath
 		prCmd.Run() // Ignore error, branch might not exist
+
+		// Also fetch the base branch so we can rebase properly
+		baseBranch := s.getPRBaseBranch(task.Repo, task.PR)
+		if baseBranch != "" {
+			baseCmd := exec.Command("git", "fetch", "origin", fmt.Sprintf("refs/heads/%s:%s", baseBranch, baseBranch))
+			baseCmd.Dir = mainRepoPath
+			if err := baseCmd.Run(); err != nil {
+				log.Printf("[WARN] Failed to fetch base branch %s: %v", baseBranch, err)
+			}
+		}
 	}
 
 	// Create worktree
@@ -1105,6 +1115,27 @@ func (s *Service) getPRBranch(repo string, prNum int) string {
 
 	log.Printf("[WEBHOOK] Got PR #%d branch: %s", prNum, result.HeadRefName)
 	return result.HeadRefName
+}
+
+// getPRBaseBranch gets the base branch name for a PR using GitHub API
+func (s *Service) getPRBaseBranch(repo string, prNum int) string {
+	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(prNum), "--json", "baseRefName", "-R", repo)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[WEBHOOK] Failed to get PR #%d base branch: %v, output: %s", prNum, err, string(output))
+		return ""
+	}
+
+	var result struct {
+		BaseRefName string `json:"baseRefName"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		log.Printf("[WEBHOOK] Failed to parse PR base branch: %v", err)
+		return ""
+	}
+
+	log.Printf("[WEBHOOK] Got PR #%d base branch: %s", prNum, result.BaseRefName)
+	return result.BaseRefName
 }
 
 func (s *Service) pushChanges(task *Task) {

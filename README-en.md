@@ -70,7 +70,7 @@ make build
 Or manually build:
 
 ```bash
-go build -o gh-claude main.go
+go build -o gh-claude
 ```
 
 ### Run
@@ -126,14 +126,14 @@ sudo systemctl start gh-claude
 
 ## API Endpoints
 
-| Endpoint   | Method | Description                    |
-|------------|--------|--------------------------------|
-| `/run`     | POST   | Submit a new task              |
-| `/status`  | GET    | Get task status by task_id     |
-| `/queue`   | GET    | List all tasks and queues      |
-| `/cancel`  | POST   | Cancel a queued task           |
-| `/webhook` | POST   | GitHub webhook receiver        |
-| `/health`  | GET    | Health check                   |
+| Endpoint   | Method | Description                |
+| ---------- | ------ | -------------------------- |
+| `/run`     | POST   | Submit a new task          |
+| `/status`  | GET    | Get task status by task_id |
+| `/queue`   | GET    | List all tasks and queues  |
+| `/cancel`  | POST   | Cancel a queued task       |
+| `/webhook` | POST   | GitHub webhook receiver    |
+| `/health`  | GET    | Health check               |
 
 ### Submit Task Example
 
@@ -201,13 +201,13 @@ For detailed usage instructions, refer to [skills/gh-claude.md](skills/gh-claude
 
 ## Configuration
 
-| Parameter          | Default Value        | Description                              |
-|--------------------|---------------------|------------------------------------------|
-| `-port`            | 3456                | HTTP server port                         |
-| `-work-dir`        | /tmp/claude-runner  | Worktree storage directory               |
-| `-max-concurrent`  | 5                   | Maximum concurrent tasks                 |
-| `-github-token`    | env var GH_TOKEN    | GitHub access token                      |
-| `-webhook-url`     | empty               | Callback URL after task completion       |
+| Parameter         | Default Value      | Description                        |
+| ----------------- | ------------------ | ---------------------------------- |
+| `-port`           | 3456               | HTTP server port                   |
+| `-work-dir`       | /tmp/claude-runner | Worktree storage directory         |
+| `-max-concurrent` | 5                  | Maximum concurrent tasks           |
+| `-github-token`   | env var GH_TOKEN   | GitHub access token                |
+| `-webhook-url`    | empty              | Callback URL after task completion |
 
 ## License
 
