@@ -205,7 +205,8 @@ func (r *RepoService) createWorktreeFromDefault(mainRepoPath, worktreePath, bran
 		wtCmd.Dir = mainRepoPath
 		wtCmd.Stdout = os.Stdout
 		wtCmd.Stderr = os.Stderr
-		if err := wtCmd.Run(); err == nil {
+		err := wtCmd.Run()
+		if err == nil {
 			return nil
 		}
 		lastErr = err
