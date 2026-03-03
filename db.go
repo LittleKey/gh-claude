@@ -197,3 +197,131 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 	log.Printf("[DB] Loaded %d pending tasks from database", len(tasks))
 	return tasks, nil
 }
+
+// GetLatestTaskByPR retrieves the most recent completed task for a PR
+func GetLatestTaskByPR(db *sql.DB, repo string, prNum int) (*Task, error) {
+	query := `
+	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
+		   created_at, started_at, ended_at, result, error, worktree,
+		   reaction_id, comment_id
+	FROM tasks
+	WHERE repo = ? AND pr_num = ? AND status IN ('completed', 'failed')
+	ORDER BY created_at DESC
+	LIMIT 1
+	`
+
+	var task Task
+	var taskDesc, result, errorStr, worktree string
+	var prNumDB, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
+	var createdAt, startedAt, endedAt int64
+	var status string
+
+	err := db.QueryRow(query, repo, prNum).Scan(
+		&task.ID,
+		&task.Repo,
+		&task.Branch,
+		&taskDesc,
+		&prNumDB,
+		&debugInt,
+		&skipBuildInt,
+		&status,
+		&createdAt,
+		&startedAt,
+		&endedAt,
+		&result,
+		&errorStr,
+		&worktree,
+		&reactionID,
+		&commentID,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query latest task by PR: %w", err)
+	}
+
+	task.Task = taskDesc
+	task.Result = result
+	task.Error = errorStr
+	task.WorkTree = worktree
+	task.Status = status
+	task.PR = int(prNumDB.Int64)
+	task.Debug = debugInt.Int64 == 1
+	task.SkipBuild = skipBuildInt.Int64 == 1
+	task.ReactionID = int(reactionID.Int64)
+	task.CommentID = int(commentID.Int64)
+	task.CreatedAt = time.Unix(createdAt, 0)
+	if startedAt > 0 {
+		task.StartedAt = time.Unix(startedAt, 0)
+	}
+	if endedAt > 0 {
+		task.EndedAt = time.Unix(endedAt, 0)
+	}
+
+	return &task, nil
+}
+
+// GetLatestTaskByBranch retrieves the most recent completed task for a branch
+func GetLatestTaskByBranch(db *sql.DB, repo, branch string) (*Task, error) {
+	query := `
+	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
+		   created_at, started_at, ended_at, result, error, worktree,
+		   reaction_id, comment_id
+	FROM tasks
+	WHERE repo = ? AND branch = ? AND status IN ('completed', 'failed')
+	ORDER BY created_at DESC
+	LIMIT 1
+	`
+
+	var task Task
+	var taskDesc, result, errorStr, worktree string
+	var prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
+	var createdAt, startedAt, endedAt int64
+	var status string
+
+	err := db.QueryRow(query, repo, branch).Scan(
+		&task.ID,
+		&task.Repo,
+		&task.Branch,
+		&taskDesc,
+		&prNum,
+		&debugInt,
+		&skipBuildInt,
+		&status,
+		&createdAt,
+		&startedAt,
+		&endedAt,
+		&result,
+		&errorStr,
+		&worktree,
+		&reactionID,
+		&commentID,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query latest task by branch: %w", err)
+	}
+
+	task.Task = taskDesc
+	task.Result = result
+	task.Error = errorStr
+	task.WorkTree = worktree
+	task.Status = status
+	task.PR = int(prNum.Int64)
+	task.Debug = debugInt.Int64 == 1
+	task.SkipBuild = skipBuildInt.Int64 == 1
+	task.ReactionID = int(reactionID.Int64)
+	task.CommentID = int(commentID.Int64)
+	task.CreatedAt = time.Unix(createdAt, 0)
+	if startedAt > 0 {
+		task.StartedAt = time.Unix(startedAt, 0)
+	}
+	if endedAt > 0 {
+		task.EndedAt = time.Unix(endedAt, 0)
+	}
+
+	return &task, nil
+}

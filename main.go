@@ -1147,20 +1147,21 @@ func (s *Service) notifyGitHub(task *Task, success bool) {
 
 	// Build comment message
 	var comment string
+	taskIDFooter := fmt.Sprintf("---\nTask ID: %s\nUse @claude to continue this task", task.ID)
 	if success {
 		duration := task.EndedAt.Sub(task.StartedAt)
 		// Use Claude's result output as the completion message
 		resultSummary := truncate(task.Result, 1000)
 		if resultSummary != "" {
-			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\n**Result:**\n%s\n\nDuration: %v",
-				task.Branch, resultSummary, duration)
+			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\n**Result:**\n%s\n\nDuration: %v\n\n%s",
+				task.Branch, resultSummary, duration, taskIDFooter)
 		} else {
-			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\nDuration: %v",
-				task.Branch, duration)
+			comment = fmt.Sprintf("✅ **Task Completed**\n\nBranch `%s` has been updated and pushed.\n\nDuration: %v\n\n%s",
+				task.Branch, duration, taskIDFooter)
 		}
 	} else {
-		comment = fmt.Sprintf("❌ **Task Failed**\n\nBranch `%s`\n\nError: %s\n\nTask: %s",
-			task.Branch, truncate(task.Error, 500), truncate(task.Task, 200))
+		comment = fmt.Sprintf("❌ **Task Failed**\n\nBranch `%s`\n\nError: %s\n\nTask: %s\n\n%s",
+			task.Branch, truncate(task.Error, 500), truncate(task.Task, 200), taskIDFooter)
 	}
 
 	// Determine where to comment: PR or Issue
@@ -1441,19 +1442,34 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 					// Build task description with context
 					taskCmd := extractTask(body)
-					if issueTitle != "" || issueBody != "" {
-						var context strings.Builder
-						if issueTitle != "" {
-							context.WriteString(fmt.Sprintf("Issue/PR Title: %s\n\n", issueTitle))
+
+					// Fetch previous task context if this is a PR or has a branch
+					var prevTaskContext string
+					if prNum > 0 && repo != "" {
+						// This is a PR - get latest task by PR
+						if prevTask, err := GetLatestTaskByPR(s.db, repo, prNum); err == nil && prevTask != nil {
+							prevTaskContext = buildPreviousTaskContext(prevTask)
 						}
-						if issueBody != "" {
-							context.WriteString(fmt.Sprintf("Issue/PR Description:\n%s\n\n", issueBody))
+					} else if branch != "" && repo != "" {
+						// This is an issue or branch-based task - get latest task by branch
+						if prevTask, err := GetLatestTaskByBranch(s.db, repo, branch); err == nil && prevTask != nil {
+							prevTaskContext = buildPreviousTaskContext(prevTask)
 						}
-						context.WriteString(fmt.Sprintf("User Command:\n%s", taskCmd))
-						taskDesc = context.String()
-					} else {
-						taskDesc = taskCmd
 					}
+
+					// Combine all context sources
+					var context strings.Builder
+					if issueTitle != "" {
+						context.WriteString(fmt.Sprintf("Issue/PR Title: %s\n\n", issueTitle))
+					}
+					if issueBody != "" {
+						context.WriteString(fmt.Sprintf("Issue/PR Description:\n%s\n\n", issueBody))
+					}
+					if prevTaskContext != "" {
+						context.WriteString(prevTaskContext)
+					}
+					context.WriteString(fmt.Sprintf("User Command:\n%s", taskCmd))
+					taskDesc = context.String()
 
 					// repository is at payload level, not under issue
 					if r, ok := payload["repository"].(map[string]interface{}); ok {
@@ -1510,6 +1526,14 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		if review, ok := payload["review"].(map[string]interface{}); ok {
 			if body, ok := review["body"].(string); ok {
+				// Fetch previous task context if this is a PR
+				var prevTaskContext string
+				if prNum > 0 && repo != "" {
+					if prevTask, err := GetLatestTaskByPR(s.db, repo, prNum); err == nil && prevTask != nil {
+						prevTaskContext = buildPreviousTaskContext(prevTask)
+					}
+				}
+
 				// Build task description with context
 				var context strings.Builder
 				if prTitle != "" {
@@ -1517,6 +1541,9 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				}
 				if prBody != "" {
 					context.WriteString(fmt.Sprintf("PR Description:\n%s\n\n", prBody))
+				}
+				if prevTaskContext != "" {
+					context.WriteString(prevTaskContext)
 				}
 				context.WriteString(fmt.Sprintf("Review Message:\n%s", body))
 				taskDesc = context.String()
@@ -1571,20 +1598,27 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 					prBody = b
 				}
 			}
-			// Build task description with context
-			if prTitle != "" || prBody != "" {
-				var context strings.Builder
-				if prTitle != "" {
-					context.WriteString(fmt.Sprintf("PR Title: %s\n\n", prTitle))
+			// Fetch previous task context if this is a PR
+			var prevTaskContext string
+			if prNum > 0 && repo != "" {
+				if prevTask, err := GetLatestTaskByPR(s.db, repo, prNum); err == nil && prevTask != nil {
+					prevTaskContext = buildPreviousTaskContext(prevTask)
 				}
-				if prBody != "" {
-					context.WriteString(fmt.Sprintf("PR Description:\n%s\n\n", prBody))
-				}
-				context.WriteString(fmt.Sprintf("Comment:\n%s", commentBody))
-				taskDesc = context.String()
-			} else {
-				taskDesc = commentBody
 			}
+
+			// Build task description with context
+			var context strings.Builder
+			if prTitle != "" {
+				context.WriteString(fmt.Sprintf("PR Title: %s\n\n", prTitle))
+			}
+			if prBody != "" {
+				context.WriteString(fmt.Sprintf("PR Description:\n%s\n\n", prBody))
+			}
+			if prevTaskContext != "" {
+				context.WriteString(prevTaskContext)
+			}
+			context.WriteString(fmt.Sprintf("Comment:\n%s", commentBody))
+			taskDesc = context.String()
 		}
 	}
 
@@ -1653,6 +1687,22 @@ func extractTask(body string) string {
 	}
 
 	return strings.Join(cleaned, "\n")
+}
+
+// buildPreviousTaskContext builds a context string from a previous task
+func buildPreviousTaskContext(prevTask *Task) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Previous Task (Branch: %s, Status: %s):\n", prevTask.Branch, prevTask.Status))
+	b.WriteString(fmt.Sprintf("Original Task: %s\n\n", truncate(prevTask.Task, 500)))
+
+	if prevTask.Result != "" {
+		b.WriteString(fmt.Sprintf("Result: %s\n\n", truncate(prevTask.Result, 500)))
+	} else if prevTask.Error != "" {
+		b.WriteString(fmt.Sprintf("Error: %s\n\n", truncate(prevTask.Error, 500)))
+	}
+
+	b.WriteString("---\n\n")
+	return b.String()
 }
 
 // expandAtReferences expands @filename references in task description
