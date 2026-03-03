@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -280,7 +279,6 @@ func (h *HttpServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Expand @filepath references if worktree exists
-	repoSafe := strings.ReplaceAll(repo, "/", "-")
 	worktreePath := h.service.repoService.GetWorktreePath(repo, branch)
 	if _, err := os.Stat(worktreePath); err == nil {
 		taskDesc = expandAtReferences(taskDesc, worktreePath)

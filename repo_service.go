@@ -205,11 +205,12 @@ func (r *RepoService) createWorktreeFromDefault(mainRepoPath, worktreePath, bran
 		wtCmd.Dir = mainRepoPath
 		wtCmd.Stdout = os.Stdout
 		wtCmd.Stderr = os.Stderr
-		if err := wtCmd.Run(); err == nil {
+		var err error
+		if err = wtCmd.Run(); err == nil {
 			return nil
 		}
 		lastErr = err
-		log.Printf("[WARN] Failed to create worktree from %s: %v", source, err)
+		log.Printf("[WARN] Failed to create worktree from %s: %v", source, lastErr)
 	}
 
 	return fmt.Errorf("failed to create worktree: %w", lastErr)
