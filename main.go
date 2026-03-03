@@ -1448,12 +1448,22 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 					if prNum > 0 && repo != "" {
 						// This is a PR - get latest task by PR
 						if prevTask, err := GetLatestTaskByPR(s.db, repo, prNum); err == nil && prevTask != nil {
+							log.Printf("[WEBHOOK] Found previous task %s for PR #%d (status: %s)", prevTask.ID, prNum, prevTask.Status)
 							prevTaskContext = buildPreviousTaskContext(prevTask)
+						} else if err != nil {
+							log.Printf("[WEBHOOK] Failed to get previous task for PR #%d: %v", prNum, err)
+						} else {
+							log.Printf("[WEBHOOK] No previous task found for PR #%d", prNum)
 						}
 					} else if branch != "" && repo != "" {
 						// This is an issue or branch-based task - get latest task by branch
 						if prevTask, err := GetLatestTaskByBranch(s.db, repo, branch); err == nil && prevTask != nil {
+							log.Printf("[WEBHOOK] Found previous task %s for branch %s (status: %s)", prevTask.ID, branch, prevTask.Status)
 							prevTaskContext = buildPreviousTaskContext(prevTask)
+						} else if err != nil {
+							log.Printf("[WEBHOOK] Failed to get previous task for branch %s: %v", branch, err)
+						} else {
+							log.Printf("[WEBHOOK] No previous task found for branch %s", branch)
 						}
 					}
 
@@ -1530,7 +1540,12 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				var prevTaskContext string
 				if prNum > 0 && repo != "" {
 					if prevTask, err := GetLatestTaskByPR(s.db, repo, prNum); err == nil && prevTask != nil {
+						log.Printf("[WEBHOOK] Found previous task %s for PR #%d (status: %s)", prevTask.ID, prNum, prevTask.Status)
 						prevTaskContext = buildPreviousTaskContext(prevTask)
+					} else if err != nil {
+						log.Printf("[WEBHOOK] Failed to get previous task for PR #%d: %v", prNum, err)
+					} else {
+						log.Printf("[WEBHOOK] No previous task found for PR #%d", prNum)
 					}
 				}
 
@@ -1602,7 +1617,12 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			var prevTaskContext string
 			if prNum > 0 && repo != "" {
 				if prevTask, err := GetLatestTaskByPR(s.db, repo, prNum); err == nil && prevTask != nil {
+					log.Printf("[WEBHOOK] Found previous task %s for PR #%d (status: %s)", prevTask.ID, prNum, prevTask.Status)
 					prevTaskContext = buildPreviousTaskContext(prevTask)
+				} else if err != nil {
+					log.Printf("[WEBHOOK] Failed to get previous task for PR #%d: %v", prNum, err)
+				} else {
+					log.Printf("[WEBHOOK] No previous task found for PR #%d", prNum)
 				}
 			}
 
