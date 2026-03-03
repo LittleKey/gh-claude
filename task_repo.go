@@ -1,5 +1,4 @@
-// Database module for task persistence using SQLite
-
+// TaskRepo provides task persistence using SQLite
 package main
 
 import (
@@ -13,8 +12,13 @@ import (
 	_ "github.com/glebarez/sqlite"
 )
 
-// InitDB initializes the database and creates tables
-func InitDB(dataDir string) (*sql.DB, error) {
+// TaskRepo provides database operations for tasks
+type TaskRepo struct {
+	db *sql.DB
+}
+
+// NewTaskRepo creates a new TaskRepo
+func NewTaskRepo(dataDir string) (*TaskRepo, error) {
 	// Ensure data directory exists
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
@@ -53,12 +57,17 @@ func InitDB(dataDir string) (*sql.DB, error) {
 	}
 
 	log.Printf("[DB] Database initialized at %s", dbPath)
-	return db, nil
+	return &TaskRepo{db: db}, nil
 }
 
-// SaveTask saves or updates a task in the database
-func SaveTask(db *sql.DB, task *Task) error {
-	log.Printf("[DB] Saving task %s (status: %s) to database", task.ID, task.Status)
+// Close closes the database connection
+func (r *TaskRepo) Close() error {
+	return r.db.Close()
+}
+
+// Save saves or updates a task in the database
+func (r *TaskRepo) Save(task *Task) error {
+	log.Printf("[DB] Saving task %s (status: %s)", task.ID, task.Status)
 
 	// Convert bool to int for SQLite
 	debugInt := 0
@@ -90,7 +99,7 @@ func SaveTask(db *sql.DB, task *Task) error {
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err := db.Exec(query,
+	_, err := r.db.Exec(query,
 		task.ID,
 		task.Repo,
 		task.Branch,
@@ -118,9 +127,9 @@ func SaveTask(db *sql.DB, task *Task) error {
 	return nil
 }
 
-// LoadPendingTasks loads all tasks with status "queued" or "running"
-func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
-	log.Printf("[DB] Loading pending tasks from database...")
+// LoadPending loads all tasks with status "queued" or "running"
+func (r *TaskRepo) LoadPending() ([]*Task, error) {
+	log.Printf("[DB] Loading pending tasks from database")
 
 	query := `
 	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
@@ -131,7 +140,7 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 	ORDER BY created_at ASC
 	`
 
-	rows, err := db.Query(query)
+	rows, err := r.db.Query(query)
 	if err != nil {
 		log.Printf("[DB] ERROR: failed to query tasks: %v", err)
 		return nil, fmt.Errorf("failed to query tasks: %w", err)
@@ -141,65 +150,23 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 	var tasks []*Task
 
 	for rows.Next() {
-		var task Task
-		var taskDesc, result, errorStr, worktree string
-		var prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
-		var createdAt, startedAt, endedAt int64
-		var status string
-
-		err := rows.Scan(
-			&task.ID,
-			&task.Repo,
-			&task.Branch,
-			&taskDesc,
-			&prNum,
-			&debugInt,
-			&skipBuildInt,
-			&status,
-			&createdAt,
-			&startedAt,
-			&endedAt,
-			&result,
-			&errorStr,
-			&worktree,
-			&reactionID,
-			&commentID,
-		)
+		task, err := r.scanTask(rows)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan task: %w", err)
+			return nil, err
 		}
-
-		task.Task = taskDesc
-		task.Result = result
-		task.Error = errorStr
-		task.WorkTree = worktree
-		task.Status = status
-		task.PR = int(prNum.Int64)
-		task.Debug = debugInt.Int64 == 1
-		task.SkipBuild = skipBuildInt.Int64 == 1
-		task.ReactionID = int(reactionID.Int64)
-		task.CommentID = int(commentID.Int64)
-		task.CreatedAt = time.Unix(createdAt, 0)
-		if startedAt > 0 {
-			task.StartedAt = time.Unix(startedAt, 0)
-		}
-		if endedAt > 0 {
-			task.EndedAt = time.Unix(endedAt, 0)
-		}
-
-		tasks = append(tasks, &task)
+		tasks = append(tasks, task)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating tasks: %w", err)
 	}
 
-	log.Printf("[DB] Loaded %d pending tasks from database", len(tasks))
+	log.Printf("[DB] Loaded %d pending tasks", len(tasks))
 	return tasks, nil
 }
 
-// GetLatestTaskByPR retrieves the most recent completed task for a PR
-func GetLatestTaskByPR(db *sql.DB, repo string, prNum int) (*Task, error) {
+// GetLatestByPR retrieves the most recent completed task for a PR
+func (r *TaskRepo) GetLatestByPR(repo string, prNum int) (*Task, error) {
 	query := `
 	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
 		   created_at, started_at, ended_at, result, error, worktree,
@@ -211,28 +178,23 @@ func GetLatestTaskByPR(db *sql.DB, repo string, prNum int) (*Task, error) {
 	`
 
 	var task Task
-	var taskDesc, result, errorStr, worktree string
-	var prNumDB, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
-	var createdAt, startedAt, endedAt int64
-	var status string
-
-	err := db.QueryRow(query, repo, prNum).Scan(
+	err := r.db.QueryRow(query, repo, prNum).Scan(
 		&task.ID,
 		&task.Repo,
 		&task.Branch,
-		&taskDesc,
-		&prNumDB,
-		&debugInt,
-		&skipBuildInt,
-		&status,
-		&createdAt,
-		&startedAt,
-		&endedAt,
-		&result,
-		&errorStr,
-		&worktree,
-		&reactionID,
-		&commentID,
+		&task.Task,
+		&task.PR,
+		&task.Debug,
+		&task.SkipBuild,
+		&task.Status,
+		&task.CreatedAt,
+		&task.StartedAt,
+		&task.EndedAt,
+		&task.Result,
+		&task.Error,
+		&task.WorkTree,
+		&task.ReactionID,
+		&task.CommentID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -241,29 +203,11 @@ func GetLatestTaskByPR(db *sql.DB, repo string, prNum int) (*Task, error) {
 		return nil, fmt.Errorf("failed to query latest task by PR: %w", err)
 	}
 
-	task.Task = taskDesc
-	task.Result = result
-	task.Error = errorStr
-	task.WorkTree = worktree
-	task.Status = status
-	task.PR = int(prNumDB.Int64)
-	task.Debug = debugInt.Int64 == 1
-	task.SkipBuild = skipBuildInt.Int64 == 1
-	task.ReactionID = int(reactionID.Int64)
-	task.CommentID = int(commentID.Int64)
-	task.CreatedAt = time.Unix(createdAt, 0)
-	if startedAt > 0 {
-		task.StartedAt = time.Unix(startedAt, 0)
-	}
-	if endedAt > 0 {
-		task.EndedAt = time.Unix(endedAt, 0)
-	}
-
 	return &task, nil
 }
 
-// GetLatestTaskByBranch retrieves the most recent completed task for a branch
-func GetLatestTaskByBranch(db *sql.DB, repo, branch string) (*Task, error) {
+// GetLatestByBranch retrieves the most recent completed task for a branch
+func (r *TaskRepo) GetLatestByBranch(repo, branch string) (*Task, error) {
 	query := `
 	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
 		   created_at, started_at, ended_at, result, error, worktree,
@@ -275,12 +219,43 @@ func GetLatestTaskByBranch(db *sql.DB, repo, branch string) (*Task, error) {
 	`
 
 	var task Task
+	err := r.db.QueryRow(query, repo, branch).Scan(
+		&task.ID,
+		&task.Repo,
+		&task.Branch,
+		&task.Task,
+		&task.PR,
+		&task.Debug,
+		&task.SkipBuild,
+		&task.Status,
+		&task.CreatedAt,
+		&task.StartedAt,
+		&task.EndedAt,
+		&task.Result,
+		&task.Error,
+		&task.WorkTree,
+		&task.ReactionID,
+		&task.CommentID,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query latest task by branch: %w", err)
+	}
+
+	return &task, nil
+}
+
+// scanTask scans a row into a Task struct
+func (r *TaskRepo) scanTask(rows *sql.Rows) (*Task, error) {
+	var task Task
 	var taskDesc, result, errorStr, worktree string
 	var prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
 	var createdAt, startedAt, endedAt int64
 	var status string
 
-	err := db.QueryRow(query, repo, branch).Scan(
+	err := rows.Scan(
 		&task.ID,
 		&task.Repo,
 		&task.Branch,
@@ -298,11 +273,8 @@ func GetLatestTaskByBranch(db *sql.DB, repo, branch string) (*Task, error) {
 		&reactionID,
 		&commentID,
 	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to query latest task by branch: %w", err)
+		return nil, fmt.Errorf("failed to scan task: %w", err)
 	}
 
 	task.Task = taskDesc
