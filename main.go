@@ -149,11 +149,12 @@ func (g *GitHub) GetPR(owner, repo string, prNumber int) (map[string]interface{}
 }
 
 type Request struct {
-	Repo   string `json:"repo"`             // owner/repo
-	Task   string `json:"task"`             // Task for Claude Code
-	Branch string `json:"branch,omitempty"` // Branch to work on (optional, will create new if not provided)
-	PR     int    `json:"pr,omitempty"`     // PR number (optional, will checkout PR branch)
-	Debug  bool   `json:"debug,omitempty"`  // Enable debug output
+	Repo      string `json:"repo"`               // owner/repo
+	Task      string `json:"task"`               // Task for Claude Code
+	Branch    string `json:"branch,omitempty"`   // Branch to work on (optional, will create new if not provided)
+	PR        int    `json:"pr,omitempty"`       // PR number (optional, will checkout PR branch)
+	Debug     bool   `json:"debug,omitempty"`     // Enable debug output
+	SkipBuild bool   `json:"skip_build,omitempty"` // Skip build step (default: false)
 }
 
 type Response struct {
@@ -173,6 +174,7 @@ type Task struct {
 	Task       string    `json:"task"`
 	PR         int       `json:"pr"` // PR number (for GitHub interaction)
 	Debug      bool      `json:"debug"`
+	SkipBuild  bool      `json:"skip_build"` // Skip build step
 	Status     string    `json:"status"` // queued, running, completed, failed
 	CreatedAt  time.Time `json:"created_at"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
@@ -452,6 +454,7 @@ func (s *Service) handleRun(w http.ResponseWriter, r *http.Request) {
 		Task:      req.Task,
 		PR:        req.PR,
 		Debug:     req.Debug,
+		SkipBuild: req.SkipBuild,
 		Status:    "queued",
 		CreatedAt: time.Now(),
 	}
@@ -682,6 +685,49 @@ func (s *Service) executeTask(task *Task, bl *BranchLock, lockKey string) {
 			}
 		}
 	}
+
+	// Step 1: Build task - install dependencies and compile (unless SkipBuild is true)
+	if !task.SkipBuild {
+		log.Printf("[EXEC] Running build step for task %s", task.ID)
+
+		buildTask := "请执行以下操作：\n1. 安装项目依赖\n2. 编译项目确认可以构建成功\n3. 如果有任何依赖缺失，请自动安装\n\n完成后报告结果。"
+
+		buildCmd := exec.Command("claude", "--dangerously-skip-permissions", buildTask)
+		buildCmd.Dir = worktreePath
+		buildCmd.Env = append(os.Environ(),
+			"CLAUDE_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),
+			"ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"),
+		)
+		// Add custom API base URL if set
+		if baseURL := os.Getenv("CLAUDE_API_BASE_URL"); baseURL != "" {
+			buildCmd.Env = append(buildCmd.Env, "CLAUDE_API_BASE_URL="+baseURL)
+		}
+		// Add custom model if set
+		if model := os.Getenv("CLAUDE_MODEL"); model != "" {
+			buildCmd.Env = append(buildCmd.Env, "CLAUDE_MODEL="+model)
+		}
+
+		buildOutput, err := buildCmd.CombinedOutput()
+
+		if len(buildOutput) > 0 {
+			log.Printf("[EXEC] Build step output: %s", truncate(string(buildOutput), 500))
+		}
+
+		if err != nil {
+			log.Printf("[EXEC] Build step failed: %v", err)
+			task.Status = "failed"
+			task.Error = fmt.Sprintf("Build step failed: %v\n\nOutput:\n%s", err, string(buildOutput))
+			task.EndedAt = time.Now()
+			s.notifyGitHub(task, false)
+			s.completeTask(task, bl, lockKey)
+			return
+		}
+
+		log.Printf("[EXEC] Build step completed successfully")
+	}
+
+	// Step 2: Run actual task
+	log.Printf("[EXEC] Running actual task: %s", truncate(task.Task, 100))
 
 	// Run Claude with proper environment
 	claudeCmd := exec.Command("claude", "--dangerously-skip-permissions", task.Task)

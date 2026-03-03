@@ -35,6 +35,7 @@ func InitDB(dataDir string) (*sql.DB, error) {
 		task_desc TEXT NOT NULL,
 		pr_num INTEGER DEFAULT 0,
 		debug INTEGER DEFAULT 0,
+		skip_build INTEGER DEFAULT 0,
 		status TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
 		started_at INTEGER,
@@ -64,6 +65,10 @@ func SaveTask(db *sql.DB, task *Task) error {
 	if task.Debug {
 		debugInt = 1
 	}
+	skipBuildInt := 0
+	if task.SkipBuild {
+		skipBuildInt = 1
+	}
 
 	// Convert time.Time to Unix timestamps
 	var createdAt, startedAt, endedAt int64
@@ -79,10 +84,10 @@ func SaveTask(db *sql.DB, task *Task) error {
 
 	query := `
 	INSERT OR REPLACE INTO tasks (
-		id, repo, branch, task_desc, pr_num, debug, status,
+		id, repo, branch, task_desc, pr_num, debug, skip_build, status,
 		created_at, started_at, ended_at, result, error, worktree,
 		reaction_id, comment_id
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := db.Exec(query,
@@ -92,6 +97,7 @@ func SaveTask(db *sql.DB, task *Task) error {
 		task.Task,
 		task.PR,
 		debugInt,
+		skipBuildInt,
 		task.Status,
 		createdAt,
 		startedAt,
@@ -117,7 +123,7 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 	log.Printf("[DB] Loading pending tasks from database...")
 
 	query := `
-	SELECT id, repo, branch, task_desc, pr_num, debug, status,
+	SELECT id, repo, branch, task_desc, pr_num, debug, skip_build, status,
 		   created_at, started_at, ended_at, result, error, worktree,
 		   reaction_id, comment_id
 	FROM tasks
@@ -137,7 +143,7 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 	for rows.Next() {
 		var task Task
 		var taskDesc, result, errorStr, worktree string
-		var prNum, debugInt, reactionID, commentID sql.NullInt64
+		var prNum, debugInt, skipBuildInt, reactionID, commentID sql.NullInt64
 		var createdAt, startedAt, endedAt int64
 		var status string
 
@@ -148,6 +154,7 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 			&taskDesc,
 			&prNum,
 			&debugInt,
+			&skipBuildInt,
 			&status,
 			&createdAt,
 			&startedAt,
@@ -169,6 +176,7 @@ func LoadPendingTasks(db *sql.DB) ([]*Task, error) {
 		task.Status = status
 		task.PR = int(prNum.Int64)
 		task.Debug = debugInt.Int64 == 1
+		task.SkipBuild = skipBuildInt.Int64 == 1
 		task.ReactionID = int(reactionID.Int64)
 		task.CommentID = int(commentID.Int64)
 		task.CreatedAt = time.Unix(createdAt, 0)
